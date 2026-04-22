@@ -28,6 +28,3 @@ output/
 
 # Keep example env file tracked
 !.env.example
-
-# Local product notes
-PRD.md
