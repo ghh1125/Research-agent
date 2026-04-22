@@ -68,7 +68,7 @@ TAVILY_MAX_RESULTS=3
 ```
 
 没有配置 API Key 时，`define/reason` 会自动走 deterministic fallback，demo 仍可运行。
-LLM 默认使用阿里云 DashScope 的 OpenAI-compatible 接口。最少需要配置 `DASHSCOPE_API_KEY`，模型可先用 `qwen-plus`；如果你要更强模型，可以把 `DASHSCOPE_MODEL` 改成你账号可用的模型名。
+LLM 默认使用阿里云 DashScope 的 OpenAI-compatible 接口。最少需要配置 `DASHSCOPE_API_KEY`，模型可先用 `qwen3.6-max-preview`；如果你要更强模型，可以把 `DASHSCOPE_MODEL` 改成你账号可用的模型名。
 如果 `SEARCH_PROVIDER=auto`，系统会使用 Tavily。没有 `TAVILY_API_KEY` 或真实 provider 报错时，请修复配置或网络；系统不会伪造检索结果。
 检索相关 API 参数也已经抽到 env，包括请求超时、每次 retrieve 最多保留多少 source、每个子问题最多保留多少 source、以及 Tavily 单次返回多少结果。
 
