@@ -1,0 +1,30 @@
+# Environment and local secrets
+.env
+.env.local
+.env.*.local
+
+# Python cache and virtualenv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime outputs
+logs/
+output/
+.cache/
+
+# Keep example env file tracked
+!.env.example
