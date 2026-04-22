@@ -6,7 +6,7 @@
 
 - 输入：自然语言研究问题
 - 输出：结构化研究过程 + 最终报告（JSON）
-- 检索：使用 Tavily 真实搜索
+- 检索：支持 Tavily、Serper/Google、Google Custom Search、Exa 多源搜索；未配置的 provider 自动跳过
 - 检索 provider：支持 `auto` / `tavily`，默认 `auto`
 - 存储：第一版使用内存 repository
 
@@ -60,25 +60,39 @@ DASHSCOPE_MODEL=qwen-plus
 
 SEARCH_PROVIDER=auto
 SEARCH_TIMEOUT_SECONDS=20
-RETRIEVE_MAX_SOURCES=5
-RETRIEVE_PER_QUESTION_LIMIT=3
+RETRIEVE_MAX_SOURCES=15
+RETRIEVE_PER_QUESTION_LIMIT=4
 TAVILY_API_KEY=your_tavily_api_key_here
 TAVILY_BASE_URL=https://api.tavily.com/search
-TAVILY_MAX_RESULTS=3
+TAVILY_MAX_RESULTS=8
+TAVILY_DAYS=180
+SERPER_API_KEY=
+SERPER_BASE_URL=https://google.serper.dev/search
+SERPER_MAX_RESULTS=8
+GOOGLE_SEARCH_API_KEY=
+GOOGLE_SEARCH_CX=
+GOOGLE_SEARCH_BASE_URL=https://www.googleapis.com/customsearch/v1
+GOOGLE_SEARCH_MAX_RESULTS=8
+EXA_API_KEY=
+EXA_BASE_URL=https://api.exa.ai/search
+EXA_MAX_RESULTS=8
 ```
 
 没有配置 API Key 时，`define/reason` 会自动走 deterministic fallback，demo 仍可运行。
 LLM 默认使用阿里云 DashScope 的 OpenAI-compatible 接口。最少需要配置 `DASHSCOPE_API_KEY`，模型可先用 `qwen3.6-max-preview`；如果你要更强模型，可以把 `DASHSCOPE_MODEL` 改成你账号可用的模型名。
-如果 `SEARCH_PROVIDER=auto`，系统会使用 Tavily。没有 `TAVILY_API_KEY` 或真实 provider 报错时，请修复配置或网络；系统不会伪造检索结果。
-检索相关 API 参数也已经抽到 env，包括请求超时、每次 retrieve 最多保留多少 source、每个子问题最多保留多少 source、以及 Tavily 单次返回多少结果。
+如果 `SEARCH_PROVIDER=auto`，系统会使用已配置的多源搜索 provider。当前支持 Tavily、Serper、Google Custom Search、Exa；未配置 API key 的 provider 会自动跳过，至少需要配置其中一个真实搜索 key。
+检索相关 API 参数也已经抽到 env，包括请求超时、每次 retrieve 最多保留多少 source、每个子问题最多保留多少 source、以及各搜索 provider 单次返回多少结果。
 
-搜索 API 当前使用 Tavily provider。真实检索最少需要：
+搜索 API 当前支持：
 
 - `SEARCH_PROVIDER=auto` 或 `SEARCH_PROVIDER=tavily`
 - `TAVILY_API_KEY=你的 Tavily key`
-- `TAVILY_BASE_URL=https://api.tavily.com/search`
+- `SERPER_API_KEY=你的 Serper key`
+- `GOOGLE_SEARCH_API_KEY=你的 Google Search key`
+- `GOOGLE_SEARCH_CX=你的 Google Programmable Search CX`
+- `EXA_API_KEY=你的 Exa key`
 
-如果没有 Tavily key，真实检索会失败；请先配置 `TAVILY_API_KEY`。
+如果没有任何搜索 key，真实检索会失败；请至少配置一个 provider。SEC EDGAR、Yahoo Finance、公司 IR 官网入口会作为投研对象相关的补充来源参与检索增强。
 
 ## 启动方式
 

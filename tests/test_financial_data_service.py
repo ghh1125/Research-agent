@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.agent.pipeline import _append_financial_source, _snapshot_to_evidence, research_pipeline
 from app.config import Settings
 from app.models.financial import FinancialMetric, FinancialSnapshot
+from app.models.judgment import ConfidenceBasis, Judgment, PeerContext
 from app.models.question import Question
 from app.models.source import Source
 from app.models.topic import Topic
-from app.services.financial_data_service import fetch_financial_snapshot, resolve_symbol
+from app.services.financial_data_service import build_peer_comparison, build_peer_universe, derive_peer_positioning, fetch_financial_snapshot, resolve_symbol
 
 
 class FinancialDataServiceTest(unittest.TestCase):
@@ -125,10 +127,54 @@ class FinancialDataServiceTest(unittest.TestCase):
             provider="test",
             content="拼多多营收增长，现金流改善。",
         )
+        judgment = Judgment(
+            topic_id="topic_test",
+            conclusion="结构化金融快照已进入证据链。",
+            conclusion_evidence_ids=[],
+            clusters=[],
+            risk=[],
+            unknown=[],
+            evidence_gaps=[],
+            confidence="low",
+            confidence_basis=ConfidenceBasis(
+                source_count=1,
+                source_diversity="low",
+                conflict_level="none",
+                evidence_gap_level="high",
+                effective_evidence_count=1,
+            ),
+            research_actions=[],
+            peer_context=PeerContext(
+                required=True,
+                status="needs_research",
+                peer_entities=[],
+                comparison_rows=[],
+                note="unit test peer context",
+            ),
+        )
 
         with patch("app.agent.pipeline.fetch_financial_snapshot", return_value=snapshot), patch(
             "app.agent.pipeline.retrieve_information",
             return_value=[source],
+        ), patch("app.agent.pipeline.inject_official_sources", return_value=[]), patch(
+            "app.agent.pipeline._enrich_and_rank_sources",
+            side_effect=lambda sources, topic: sources,
+        ), patch(
+            "app.agent.pipeline.auto_research_loop",
+            side_effect=lambda topic, questions, sources, evidence, variables, judgment, actions: SimpleNamespace(
+                sources=sources,
+                evidence=evidence,
+                variables=variables,
+                judgment=judgment,
+                actions=actions,
+                trace=[],
+            ),
+        ), patch("app.agent.pipeline.reason_and_generate", return_value=judgment), patch(
+            "app.agent.pipeline.apply_investment_layer",
+            side_effect=lambda topic, questions, evidence, judgment, variables: judgment,
+        ), patch(
+            "app.agent.pipeline.synthesize_role_outputs",
+            return_value=[],
         ), patch("app.agent.steps.decompose.call_llm", side_effect=RuntimeError("skip llm in unit test")), patch(
             "app.agent.steps.define.call_llm",
             side_effect=RuntimeError("skip llm in unit test"),
@@ -396,6 +442,72 @@ class FinancialDataServiceTest(unittest.TestCase):
         self.assertTrue(any(metric.source.startswith("massive.") for metric in snapshot.metrics))
         self.assertEqual(snapshot.provider_attempts[0].provider, "yfinance")
         self.assertEqual(snapshot.provider_attempts[1].provider, "polygon")
+
+    def test_peer_universe_contains_business_groups_for_known_listed_companies(self) -> None:
+        nvda = build_peer_universe("NVDA")
+        tencent = build_peer_universe("0700.HK")
+        catl = build_peer_universe("300750.SZ")
+
+        self.assertTrue(any(item["ticker"] == "AMD" and item["peer_group"] == "direct_competitor" for item in nvda))
+        self.assertTrue(any(item["ticker"] == "TSM" and item["peer_group"] == "value_chain_peer" for item in nvda))
+        self.assertTrue(any(item["peer_name"] == "字节跳动" and item["peer_group"] == "business_substitute" for item in tencent))
+        self.assertTrue(any(item["ticker"] == "373220.KS" for item in catl))
+        self.assertTrue(all("benchmark_dimensions" in item for item in nvda + tencent + catl))
+
+    def test_peer_comparison_uses_unified_benchmark_schema(self) -> None:
+        fake_info = {
+            "NVDA": {
+                "shortName": "NVIDIA",
+                "marketCap": 3000,
+                "trailingPE": 45.0,
+                "enterpriseToEbitda": 35.0,
+                "profitMargins": 0.55,
+                "grossMargins": 0.73,
+                "revenueGrowth": 1.2,
+                "debtToEquity": 20.0,
+                "returnOnEquity": 0.9,
+            },
+            "AMD": {
+                "shortName": "AMD",
+                "marketCap": 300,
+                "trailingPE": 30.0,
+                "enterpriseToEbitda": 24.0,
+                "profitMargins": 0.10,
+                "grossMargins": 0.50,
+                "revenueGrowth": 0.2,
+            },
+        }
+
+        class _Ticker:
+            def __init__(self, symbol: str) -> None:
+                self.info = fake_info.get(symbol, {})
+
+        with patch("yfinance.Ticker", side_effect=_Ticker):
+            rows = build_peer_comparison("NVDA", ["AMD"])
+
+        target = rows[0]
+        self.assertEqual(target["ticker"], "NVDA")
+        self.assertEqual(target["peer_name"], "NVIDIA")
+        self.assertEqual(target["revenue_growth"], 1.2)
+        self.assertEqual(target["gross_margin"], 0.73)
+        self.assertEqual(target["valuation_pe"], 45.0)
+        self.assertEqual(target["valuation_ev_ebitda"], 35.0)
+        self.assertIn("capex_intensity", target["benchmark_dimensions"])
+        self.assertIn("overseas_exposure", target)
+
+    def test_derive_peer_positioning_flags_target_relative_strength(self) -> None:
+        rows = [
+            {"ticker": "NVDA", "revenue_growth": 1.2, "gross_margin": 0.73, "valuation_pe": 45.0},
+            {"ticker": "AMD", "revenue_growth": 0.2, "gross_margin": 0.50, "valuation_pe": 30.0},
+            {"ticker": "INTC", "revenue_growth": -0.1, "gross_margin": 0.42, "valuation_pe": 18.0},
+        ]
+
+        positioning = derive_peer_positioning(rows, target_symbol="NVDA")
+
+        self.assertEqual(positioning["target_symbol"], "NVDA")
+        self.assertIn("growth_above_peer_median", positioning["signals"])
+        self.assertIn("margin_above_peer_median", positioning["signals"])
+        self.assertIn("valuation_above_peer_median", positioning["signals"])
 
 
 if __name__ == "__main__":

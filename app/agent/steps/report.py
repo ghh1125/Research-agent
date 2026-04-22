@@ -449,20 +449,26 @@ def _build_investment_section(judgment: Judgment) -> ReportSection:
     peer_table_lines = []
     if peer.comparison_rows:
         if any("symbol" in row for row in peer.comparison_rows):
-            peer_table_lines.append("| 公司 | 市值 | PE | 利润率 | 营收增长 | 负债权益比 | ROE |")
-            peer_table_lines.append("|---|---:|---:|---:|---:|---:|---:|")
-            for row in peer.comparison_rows[:4]:
+            peer_table_lines.append("| 公司 | 分组 | 营收增速 | 毛利率 | PE | EV/EBITDA | CAPEX强度 | 市占率 | 海外布局 |")
+            peer_table_lines.append("|---|---|---:|---:|---:|---:|---:|---|---|")
+            for row in peer.comparison_rows[:6]:
                 peer_table_lines.append(
-                    "| {symbol} | {marketCap} | {trailingPE} | {profitMargins} | {revenueGrowth} | {debtToEquity} | {returnOnEquity} |".format(
-                        symbol=row.get("symbol", ""),
-                        marketCap=row.get("marketCap", ""),
-                        trailingPE=row.get("trailingPE", ""),
-                        profitMargins=row.get("profitMargins", ""),
-                        revenueGrowth=row.get("revenueGrowth", ""),
-                        debtToEquity=row.get("debtToEquity", ""),
-                        returnOnEquity=row.get("returnOnEquity", ""),
+                    "| {name} | {group} | {growth} | {margin} | {pe} | {ev_ebitda} | {capex} | {share} | {overseas} |".format(
+                        name=row.get("peer_name") or row.get("symbol") or row.get("ticker") or "",
+                        group=row.get("peer_group", ""),
+                        growth=row.get("revenue_growth", row.get("revenueGrowth", "")),
+                        margin=row.get("gross_margin", row.get("grossMargins", row.get("profitMargins", ""))),
+                        pe=row.get("valuation_pe", row.get("trailingPE", "")),
+                        ev_ebitda=row.get("valuation_ev_ebitda", row.get("enterpriseToEbitda", "")),
+                        capex=row.get("capex_intensity", ""),
+                        share=row.get("market_share", ""),
+                        overseas=row.get("overseas_exposure", ""),
                     )
                 )
+            positioning = next((row.get("positioning") for row in peer.comparison_rows if row.get("positioning")), None)
+            if positioning:
+                peer_table_lines.append("")
+                peer_table_lines.append(f"同行定位信号：{', '.join(positioning.get('signals', [])) or '暂无'}")
         else:
             peer_table_lines.append("| Peer Group | Peer | Benchmark Dimensions | Status |")
             peer_table_lines.append("|---|---|---|---|")

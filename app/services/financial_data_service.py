@@ -40,18 +40,51 @@ _PEER_SYMBOLS = {
     "PDD": ["BABA", "JD", "AMZN"],
     "BABA": ["PDD", "JD", "AMZN"],
     "JD": ["BABA", "PDD"],
-    "300750.SZ": ["1211.HK", "TSLA"],
-    "1211.HK": ["300750.SZ", "TSLA"],
-    "TSLA": ["1211.HK", "300750.SZ"],
-    "NVDA": ["AMD", "AVGO", "INTC"],
-    "AMD": ["NVDA", "AVGO", "INTC"],
-    "AVGO": ["NVDA", "AMD", "INTC"],
+    "300750.SZ": ["1211.HK", "373220.KS", "6752.T", "3931.HK"],
+    "1211.HK": ["300750.SZ", "373220.KS", "6752.T"],
+    "TSLA": ["1211.HK", "300750.SZ", "RIVN"],
+    "NVDA": ["AMD", "INTC", "AVGO", "TSM"],
+    "AMD": ["NVDA", "AVGO", "INTC", "TSM"],
+    "AVGO": ["NVDA", "AMD", "INTC", "QCOM"],
     "MSFT": ["AAPL", "GOOG", "AMZN"],
     "AAPL": ["MSFT", "GOOG", "AMZN"],
-    "0700.HK": ["BABA", "3690.HK", "JD"],
+    "0700.HK": ["META", "NTES", "SE", "BABA"],
     "3690.HK": ["0700.HK", "BABA", "JD"],
     "JPM": ["BAC", "C", "GS"],
     "BAC": ["JPM", "C", "WFC"],
+}
+
+_BENCHMARK_DIMENSIONS = [
+    "revenue_growth",
+    "gross_margin",
+    "valuation",
+    "market_share",
+    "capex_intensity",
+    "overseas_exposure",
+]
+
+_PEER_UNIVERSE = {
+    "NVDA": [
+        {"ticker": "NVDA", "peer_name": "NVIDIA", "peer_group": "target", "market": "US", "market_share": "AI accelerator leader", "overseas_exposure": "global"},
+        {"ticker": "AMD", "peer_name": "AMD", "peer_group": "direct_competitor", "market": "US", "market_share": "GPU/accelerator challenger", "overseas_exposure": "global"},
+        {"ticker": "INTC", "peer_name": "Intel", "peer_group": "direct_competitor", "market": "US", "market_share": "CPU incumbent with accelerator push", "overseas_exposure": "global"},
+        {"ticker": "AVGO", "peer_name": "Broadcom", "peer_group": "ecosystem_peer", "market": "US", "market_share": "custom silicon/networking", "overseas_exposure": "global"},
+        {"ticker": "TSM", "peer_name": "TSMC", "peer_group": "value_chain_peer", "market": "US_ADR", "market_share": "advanced foundry leader", "overseas_exposure": "global"},
+    ],
+    "0700.HK": [
+        {"ticker": "0700.HK", "peer_name": "腾讯控股", "peer_group": "target", "market": "HK", "market_share": "China social/gaming leader", "overseas_exposure": "selective"},
+        {"ticker": "META", "peer_name": "Meta", "peer_group": "global_peer", "market": "US", "market_share": "global social platform leader", "overseas_exposure": "global"},
+        {"ticker": "NTES", "peer_name": "网易", "peer_group": "direct_competitor", "market": "US_ADR", "market_share": "China online game peer", "overseas_exposure": "selective"},
+        {"ticker": "SE", "peer_name": "Sea", "peer_group": "regional_peer", "market": "US_ADR", "market_share": "SEA gaming/e-commerce platform", "overseas_exposure": "Southeast Asia"},
+        {"ticker": None, "peer_name": "字节跳动", "peer_group": "business_substitute", "market": "private", "market_share": "short-video and ads competitor", "overseas_exposure": "global"},
+    ],
+    "300750.SZ": [
+        {"ticker": "300750.SZ", "peer_name": "宁德时代", "peer_group": "target", "market": "A_share", "market_share": "global power battery leader", "overseas_exposure": "global"},
+        {"ticker": "1211.HK", "peer_name": "比亚迪", "peer_group": "local_peer", "market": "HK", "market_share": "integrated EV and battery peer", "overseas_exposure": "global"},
+        {"ticker": "373220.KS", "peer_name": "LG Energy Solution", "peer_group": "global_peer", "market": "KR", "market_share": "global battery peer", "overseas_exposure": "global"},
+        {"ticker": "6752.T", "peer_name": "Panasonic", "peer_group": "global_peer", "market": "JP", "market_share": "Japanese battery supplier", "overseas_exposure": "global"},
+        {"ticker": "3931.HK", "peer_name": "中创新航", "peer_group": "challenger", "market": "HK", "market_share": "China second-tier battery challenger", "overseas_exposure": "emerging"},
+    ],
 }
 
 _INVESTING_SLUGS = {
@@ -752,26 +785,135 @@ def _valuation_from_metrics(metrics: list[FinancialMetric], peer_rows: list[dict
     return {key: value for key, value in valuation.items() if value is not None}
 
 
+def build_peer_universe(entity_symbol: str) -> list[dict]:
+    universe = _PEER_UNIVERSE.get(entity_symbol)
+    if universe:
+        return [
+            {
+                **item,
+                "benchmark_dimensions": list(_BENCHMARK_DIMENSIONS),
+            }
+            for item in universe
+        ]
+    return [
+        {
+            "ticker": symbol,
+            "peer_name": symbol,
+            "peer_group": "target" if index == 0 else "direct_competitor",
+            "market": "unknown",
+            "market_share": None,
+            "overseas_exposure": None,
+            "benchmark_dimensions": list(_BENCHMARK_DIMENSIONS),
+        }
+        for index, symbol in enumerate([entity_symbol, *_PEER_SYMBOLS.get(entity_symbol, [])])
+    ]
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
+
+
+def derive_peer_positioning(rows: list[dict], target_symbol: str | None = None) -> dict:
+    if not rows:
+        return {"target_symbol": target_symbol, "signals": [], "peer_medians": {}}
+    target = next((row for row in rows if target_symbol and row.get("ticker") == target_symbol), rows[0])
+    peers = [row for row in rows if row is not target]
+    metrics = {
+        "revenue_growth": "growth_above_peer_median",
+        "gross_margin": "margin_above_peer_median",
+        "valuation_pe": "valuation_above_peer_median",
+    }
+    signals: list[str] = []
+    medians: dict[str, float] = {}
+    for metric, signal in metrics.items():
+        target_value = target.get(metric)
+        peer_values = [float(row[metric]) for row in peers if isinstance(row.get(metric), (int, float))]
+        median = _median(peer_values)
+        if median is None or not isinstance(target_value, (int, float)):
+            continue
+        medians[metric] = median
+        if float(target_value) > median:
+            signals.append(signal)
+    return {
+        "target_symbol": target.get("ticker") or target_symbol,
+        "signals": signals,
+        "peer_medians": medians,
+    }
+
+
 def build_peer_comparison(entity_symbol: str, peer_symbols: list[str]) -> list[dict]:
     import yfinance as yf
 
     rows: list[dict] = []
-    for symbol in [entity_symbol, *peer_symbols[:3]]:
+    universe = build_peer_universe(entity_symbol)
+    if peer_symbols:
+        known_tickers = {item.get("ticker") for item in universe}
+        for symbol in peer_symbols:
+            if symbol not in known_tickers:
+                universe.append(
+                    {
+                        "ticker": symbol,
+                        "peer_name": symbol,
+                        "peer_group": "direct_competitor",
+                        "market": "unknown",
+                        "market_share": None,
+                        "overseas_exposure": None,
+                        "benchmark_dimensions": list(_BENCHMARK_DIMENSIONS),
+                    }
+                )
+    for meta in universe[:6]:
+        symbol = meta.get("ticker")
+        if not symbol:
+            rows.append(
+                {
+                    "symbol": None,
+                    "ticker": None,
+                    "peer_name": meta.get("peer_name"),
+                    "peer_group": meta.get("peer_group"),
+                    "market": meta.get("market"),
+                    "market_share": meta.get("market_share"),
+                    "overseas_exposure": meta.get("overseas_exposure"),
+                    "benchmark_dimensions": meta.get("benchmark_dimensions", list(_BENCHMARK_DIMENSIONS)),
+                    "status": "needs_manual_data",
+                }
+            )
+            continue
         try:
             info = yf.Ticker(symbol).info or {}
         except Exception:
             continue
+        name = info.get("shortName") or info.get("longName") or meta.get("peer_name") or symbol
         row = {
             "symbol": symbol,
+            "ticker": symbol,
+            "peer_name": name,
+            "peer_group": meta.get("peer_group"),
+            "market": meta.get("market"),
+            "benchmark_dimensions": meta.get("benchmark_dimensions", list(_BENCHMARK_DIMENSIONS)),
             "marketCap": _safe_info_value(info, "marketCap"),
             "trailingPE": _safe_info_value(info, "trailingPE"),
+            "enterpriseToEbitda": _safe_info_value(info, "enterpriseToEbitda"),
             "profitMargins": _safe_info_value(info, "profitMargins"),
+            "grossMargins": _safe_info_value(info, "grossMargins"),
             "revenueGrowth": _safe_info_value(info, "revenueGrowth"),
             "debtToEquity": _safe_info_value(info, "debtToEquity"),
             "returnOnEquity": _safe_info_value(info, "returnOnEquity"),
+            "revenue_growth": _safe_info_value(info, "revenueGrowth"),
+            "gross_margin": _safe_info_value(info, "grossMargins"),
+            "valuation_pe": _safe_info_value(info, "trailingPE"),
+            "valuation_ev_ebitda": _safe_info_value(info, "enterpriseToEbitda"),
+            "capex_intensity": _safe_info_value(info, "capexToRevenue"),
+            "market_share": meta.get("market_share"),
+            "overseas_exposure": meta.get("overseas_exposure"),
         }
         if any(value is not None for key, value in row.items() if key != "symbol"):
             rows.append(row)
+    positioning = derive_peer_positioning(rows, target_symbol=entity_symbol)
+    if rows and positioning.get("signals"):
+        rows[0]["positioning"] = positioning
     return rows
 
 

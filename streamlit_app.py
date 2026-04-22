@@ -6,10 +6,12 @@ from html import escape
 import streamlit as st
 
 from app.agent.pipeline import research_pipeline
+from app.config import get_settings
 from app.models.evidence import Evidence
 from app.models.question import Question
 from app.models.role import ResearchRoleOutput
 from app.models.source import Source
+from app.services.search_service import get_search_provider_status
 
 
 st.set_page_config(
@@ -382,6 +384,35 @@ def _metric_card(label: str, value: object, hint: str | None = None) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_search_api_status() -> None:
+    settings = get_settings()
+    rows = get_search_provider_status(settings)
+    enabled_rows = [row for row in rows if row["enabled"]]
+    st.subheader("搜索 API 状态")
+    st.caption("只展示 key 是否已配置，不展示真实密钥；Google Custom Search 需要同时配置 API key 和 CX。")
+    st.write(f"SEARCH_PROVIDER：`{settings.search_provider}`")
+    st.write(f"已启用：{len(enabled_rows)} / {len(rows)}")
+    st.dataframe(
+        [
+            {
+                "Provider": row["provider"],
+                "状态": "启用" if row["enabled"] else "未启用",
+                "用途": row["purpose"],
+                "单次上限": row["max_results"],
+                "配置项": row["required_env"],
+                "说明": row["note"],
+            }
+            for row in rows
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+    if settings.supplemental_search_enabled:
+        st.caption("垂直补充源：SEC EDGAR、Yahoo Finance/yfinance、公司 IR 官网直连已启用；这些来源不一定需要搜索 API key。")
+    else:
+        st.caption("垂直补充源已关闭。")
 
 
 def _financial_status_hint(snapshot) -> str:
@@ -1064,7 +1095,9 @@ def main() -> None:
         for index, step in enumerate(steps, start=1):
             st.write(f"{index:02d}. {step}")
         st.divider()
-        st.caption("运行前请确认 `.env` 已配置 DASHSCOPE_API_KEY 和 TAVILY_API_KEY。")
+        render_search_api_status()
+        st.divider()
+        st.caption("运行前请确认 `.env` 已配置 LLM key；搜索侧会自动使用上方已启用 provider。")
         st.caption("页面只负责展示，底层仍调用 research_pipeline。")
         st.divider()
         st.header("3 分钟演示话术")

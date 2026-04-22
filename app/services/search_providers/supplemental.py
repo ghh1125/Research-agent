@@ -46,6 +46,24 @@ _SEC_CIK_MAP = {
     "NTES": "0001110646",
 }
 
+_COMPANY_IR_URLS = {
+    "AAPL": ("Apple Investor Relations", "https://investor.apple.com/"),
+    "MSFT": ("Microsoft Investor Relations", "https://www.microsoft.com/en-us/Investor/"),
+    "NVDA": ("NVIDIA Investor Relations", "https://investor.nvidia.com/"),
+    "TSLA": ("Tesla Investor Relations", "https://ir.tesla.com/"),
+    "AMD": ("AMD Investor Relations", "https://ir.amd.com/"),
+    "AVGO": ("Broadcom Investor Relations", "https://investors.broadcom.com/"),
+    "PDD": ("PDD Holdings Investor Relations", "https://investor.pddholdings.com/"),
+    "BABA": ("Alibaba Investor Relations", "https://www.alibabagroup.com/en-US/ir"),
+    "JD": ("JD.com Investor Relations", "https://ir.jd.com/"),
+    "BIDU": ("Baidu Investor Relations", "https://ir.baidu.com/"),
+    "NTES": ("NetEase Investor Relations", "https://ir.netease.com/"),
+    "0700.HK": ("Tencent Investor Relations", "https://www.tencent.com/en-us/investors.html"),
+    "3690.HK": ("Meituan Investor Relations", "https://about.meituan.com/en/investor-relations"),
+    "1211.HK": ("BYD Investor Relations", "https://www.bydglobal.com/en/Investor.html"),
+    "300750.SZ": ("CATL Investor Relations", "https://www.catl.com/en/investor/"),
+}
+
 
 @dataclass(frozen=True)
 class ProviderSearchResult:
@@ -245,11 +263,45 @@ class SecEdgarSupplementalProvider:
         )
 
 
+class CompanyIRSupplementalProvider:
+    name = "company_ir_direct"
+
+    def search(self, query: str, topic: Topic | None = None) -> ProviderSearchResult:
+        symbol = _resolve_symbol(topic)
+        if not symbol:
+            return ProviderSearchResult(provider=self.name, status="empty")
+        entry = _COMPANY_IR_URLS.get(symbol)
+        if not entry:
+            return ProviderSearchResult(provider=self.name, status="empty")
+        title, url = entry
+        entity = (topic.entity or topic.topic) if topic else symbol
+        content = (
+            f"{entity} 公司 IR 官方入口：{title}，用于直达年报、季度业绩、公告、电话会材料和投资者演示。"
+            "该入口属于公司官方投资者关系来源，后续内容抓取和 PDF 解析会优先从这里发现高可信证据。"
+        )
+        return ProviderSearchResult(
+            provider=self.name,
+            status="success",
+            items=[
+                {
+                    "url": url,
+                    "title": title,
+                    "source_type": "company",
+                    "provider": self.name,
+                    "published_at": None,
+                    "content": content,
+                    "source_origin_type": "company_ir",
+                }
+            ],
+        )
+
+
 def get_supplemental_providers(settings: Settings | None = None) -> list[SupplementalProvider]:
     active_settings = settings or get_settings()
     if not active_settings.supplemental_search_enabled:
         return []
     return [
+        CompanyIRSupplementalProvider(),
         AkshareSupplementalProvider(),
         YFinanceSupplementalProvider(),
         SecEdgarSupplementalProvider(active_settings),

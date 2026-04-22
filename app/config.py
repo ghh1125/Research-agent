@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     tavily_base_url: str = "https://api.tavily.com/search"
     tavily_max_results: int = 8
     tavily_days: int = 180
+    serper_api_key: str = ""
+    serper_base_url: str = "https://google.serper.dev/search"
+    serper_max_results: int = 8
+    google_search_api_key: str = ""
+    google_search_cx: str = ""
+    google_search_base_url: str = "https://www.googleapis.com/customsearch/v1"
+    google_search_max_results: int = 8
+    exa_api_key: str = ""
+    exa_base_url: str = "https://api.exa.ai/search"
+    exa_max_results: int = 8
     finnhub_api_key: str = ""
     finnhub_base_url: str = "https://finnhub.io/api/v1"
     massive_api_key: str = ""

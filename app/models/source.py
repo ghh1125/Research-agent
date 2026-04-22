@@ -50,6 +50,8 @@ class Source(BaseModel):
     pdf_parse_status: Literal["not_pdf", "not_attempted", "parsed", "failed"] = "not_pdf"
     parsed_tables: list[dict] = Field(default_factory=list)
     parsed_pages: list[dict] = Field(default_factory=list)
+    structured_metrics: list[dict] = Field(default_factory=list)
+    ocr_required: bool = False
     published_at: str | None = None
     content: str
     fetched_content: str | None = None

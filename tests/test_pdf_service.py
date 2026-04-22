@@ -4,7 +4,18 @@ import unittest
 from unittest.mock import patch
 
 from app.models.source import Source
-from app.services.pdf_service import _extract_table_like_rows, _score_pdf_page, _select_high_value_pages, extract_financial_rows, parse_pdf_source
+from app.services.pdf_service import (
+    _extract_table_like_rows,
+    _score_pdf_page,
+    _select_high_value_pages,
+    classify_pdf_page,
+    detect_repeated_headers_footers,
+    extract_financial_rows,
+    extract_structured_pdf_metrics,
+    needs_ocr_fallback,
+    parse_pdf_source,
+    remove_pdf_noise_lines,
+)
 
 
 class PdfServiceTest(unittest.TestCase):
@@ -94,6 +105,63 @@ class PdfServiceTest(unittest.TestCase):
         selected = _select_high_value_pages(records, max_pages=2)
 
         self.assertIn(2, selected)
+
+    def test_classify_pdf_page_locates_financial_statements(self) -> None:
+        self.assertEqual(classify_pdf_page("合并资产负债表 总资产 总负债 货币资金"), "balance_sheet")
+        self.assertEqual(classify_pdf_page("合并利润表 营业收入 营业成本 净利润"), "income_statement")
+        self.assertEqual(classify_pdf_page("合并现金流量表 经营活动产生的现金流量净额 投资活动现金流"), "cashflow_statement")
+        self.assertEqual(classify_pdf_page("主要会计数据 营业收入 净利润 毛利率"), "financial_summary")
+        self.assertEqual(classify_pdf_page("目录 第一节 释义 第二节 公司简介"), "toc")
+
+    def test_extract_structured_pdf_metrics_normalizes_financial_fields(self) -> None:
+        text = (
+            "主要会计数据 营业收入 3,620.1亿元，同比增长18.2%；"
+            "归属于上市公司股东的净利润 441.0亿元，同比增长12.0%；"
+            "毛利率 24.6%，同比增加1.2个百分点；"
+            "经营活动产生的现金流量净额 928.0亿元；"
+            "购建固定资产、无形资产和其他长期资产支付的现金 510.5亿元。"
+        )
+
+        metrics = extract_structured_pdf_metrics(text)
+        metric_by_name = {item["metric_name"]: item for item in metrics}
+
+        self.assertIn("revenue", metric_by_name)
+        self.assertIn("net_income_attributable", metric_by_name)
+        self.assertIn("gross_margin", metric_by_name)
+        self.assertIn("operating_cash_flow", metric_by_name)
+        self.assertIn("capex", metric_by_name)
+        self.assertEqual(metric_by_name["revenue"]["value"], 3620.1)
+        self.assertEqual(metric_by_name["revenue"]["unit"], "亿元")
+        self.assertEqual(metric_by_name["gross_margin"]["value"], 24.6)
+        self.assertEqual(metric_by_name["gross_margin"]["unit"], "%")
+        self.assertFalse(metric_by_name["revenue"]["is_truncated"])
+
+    def test_pdf_noise_filter_removes_repeated_headers_and_footers(self) -> None:
+        pages = [
+            "2025年度报告全文\n第1页\n营业收入 100亿元 同比增长10%",
+            "2025年度报告全文\n第2页\n净利润 20亿元 同比增长5%",
+            "2025年度报告全文\n第3页\n经营活动产生的现金流量净额 30亿元",
+        ]
+
+        noise = detect_repeated_headers_footers(pages)
+        cleaned = remove_pdf_noise_lines(pages[0], noise)
+
+        self.assertIn("2025年度报告全文", noise)
+        self.assertNotIn("2025年度报告全文", cleaned)
+        self.assertNotIn("第1页", cleaned)
+        self.assertIn("营业收入 100亿元", cleaned)
+
+    def test_truncated_metric_fragments_are_downgraded(self) -> None:
+        metrics = extract_structured_pdf_metrics("营业收入 84 净利润 67 毛利率 2")
+
+        self.assertTrue(metrics)
+        self.assertTrue(all(item["is_truncated"] for item in metrics))
+        self.assertTrue(all(item["can_enter_summary"] is False for item in metrics))
+        self.assertTrue(all(item["weight"] <= 0.3 for item in metrics))
+
+    def test_ocr_fallback_detects_scanned_financial_page(self) -> None:
+        self.assertTrue(needs_ocr_fallback("", image_count=2, page_score=0.7))
+        self.assertFalse(needs_ocr_fallback("营业收入 100亿元 净利润 20亿元", image_count=0, page_score=0.7))
 
 
 if __name__ == "__main__":
