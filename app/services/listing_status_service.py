@@ -76,6 +76,21 @@ def _match_alias(text: str, alias_map: dict[str, list[str]]) -> str | None:
     return None
 
 
+def get_known_entity_aliases(entity: str | None) -> list[str]:
+    """Return canonical aliases used across entity resolution and evidence matching."""
+
+    if not entity:
+        return []
+    aliases: set[str] = {entity}
+    lowered_entity = entity.lower()
+    for alias_map in (_PRIVATE_COMPANY_ALIASES, _LISTED_COMPANY_ALIASES):
+        for canonical, candidate_aliases in alias_map.items():
+            if canonical == entity or canonical.lower() == lowered_entity or any(alias.lower() == lowered_entity for alias in candidate_aliases):
+                aliases.add(canonical)
+                aliases.update(candidate_aliases)
+    return [alias for alias in aliases if alias]
+
+
 def normalize_entity_candidate(query: str, candidate: str | None) -> str | None:
     """Normalize entity text so words like 股票 do not become part of the company name."""
 

@@ -45,6 +45,9 @@ class Source(BaseModel):
     date_source: Literal["provider", "url_extracted", "content_extracted", "unknown"] = "unknown"
     is_pdf: bool = False
     is_official_pdf: bool = False
+    is_official_target_source: bool = False
+    target_reason: str | None = None
+    rejected_reason: str | None = None
     page_score: float | None = None
     page_type: str | None = None
     pdf_parse_status: Literal["not_pdf", "not_attempted", "parsed", "failed"] = "not_pdf"

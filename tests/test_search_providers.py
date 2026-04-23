@@ -238,24 +238,39 @@ class SearchProviderTest(unittest.TestCase):
         self.assertEqual(attempt.items[0]["source_origin_type"], "company_ir")
         self.assertIn("investor", attempt.items[0]["url"])
 
-    @patch("httpx.get")
-    def test_sec_edgar_provider_returns_official_disclosure_source(self, get_mock) -> None:
-        class _Response:
-            def raise_for_status(self) -> None:
-                return None
-
-            def json(self) -> dict:
-                return {
-                    "name": "APPLE INC",
-                    "filings": {
-                        "recent": {
-                            "form": ["10-K", "10-Q"],
-                            "filingDate": ["2025-10-31", "2025-08-01"],
-                        }
-                    },
+    @patch("app.services.search_providers.supplemental._httpx_get_json")
+    def test_sec_edgar_provider_returns_official_disclosure_source(self, get_json_mock) -> None:
+        get_json_mock.side_effect = [
+            {
+                "name": "APPLE INC",
+                "filings": {
+                    "recent": {
+                        "form": ["10-K", "10-Q"],
+                        "filingDate": ["2025-10-31", "2025-08-01"],
+                    }
+                },
+            },
+            {
+                "facts": {
+                    "us-gaap": {
+                        "Revenues": {
+                            "units": {
+                                "USD": [
+                                    {"form": "10-K", "fy": 2025, "fp": "FY", "end": "2025-09-30", "filed": "2025-10-31", "val": 391035000000}
+                                ]
+                            }
+                        },
+                        "NetCashProvidedByUsedInOperatingActivities": {
+                            "units": {
+                                "USD": [
+                                    {"form": "10-K", "fy": 2025, "fp": "FY", "end": "2025-09-30", "filed": "2025-10-31", "val": 118254000000}
+                                ]
+                            }
+                        },
+                    }
                 }
-
-        get_mock.return_value = _Response()
+            },
+        ]
         topic = Topic(
             id="topic_us",
             query="研究苹果财务质量",
@@ -275,7 +290,9 @@ class SearchProviderTest(unittest.TestCase):
         self.assertEqual(attempt.items[0]["source_type"], "regulatory")
         self.assertEqual(attempt.items[0]["source_origin_type"], "official_disclosure")
         self.assertIn("10-K@2025-10-31", attempt.items[0]["content"])
-        self.assertIn("analyst@example.com", get_mock.call_args.kwargs["headers"]["User-Agent"])
+        self.assertIn("Revenue: USD391035 million in FY2025", attempt.items[0]["content"])
+        self.assertIn("Operating cash flow: USD118254 million in FY2025", attempt.items[0]["content"])
+        self.assertIn("analyst@example.com", get_json_mock.call_args.kwargs["headers"]["User-Agent"])
 
     def test_supplemental_search_skips_failed_provider_without_blocking_results(self) -> None:
         class _GoodProvider:

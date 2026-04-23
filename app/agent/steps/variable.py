@@ -10,7 +10,9 @@ _VARIABLE_SPECS: list[tuple[str, str, list[str], bool]] = [
     ("收入增长", "financial", ["营业收入", "营收", "同比增速", "季度收入", "分业务收入", "分地区收入"], True),
     ("盈利能力", "financial", ["毛利率", "净利率", "扣非净利", "扣非净利润", "ROE", "ROIC", "EBIT Margin", "净利润"], True),
     ("现金流质量", "financial", ["经营现金流", "经营活动现金流", "自由现金流", "资本开支", "CAPEX", "现金转换率"], True),
-    ("负债压力", "financial", ["资产负债率", "有息负债", "债务结构", "短债", "流动比率", "速动比率"], True),
+    ("资本开支强度", "financial", ["资本开支", "CAPEX", "capex", "capital expenditures"], True),
+    ("云业务增长", "financial", ["cloud revenue", "Cloud Intelligence", "云业务收入", "阿里云收入"], True),
+    ("负债压力", "financial", ["资产负债率", "有息负债", "债务结构", "短债", "流动比率", "速动比率", "liabilities", "cash and cash equivalents"], True),
     ("行业竞争", "industry", ["市场份额", "市占率", "客户结构", "ASP", "同行排名", "产能份额", "技术份额", "同行对比"], True),
     ("护城河", "industry", ["retention", "留存率", "MAU", "DAU", "merchant", "商户", "take rate", "货币化率", "merchant density", "商户密度", "ecosystem lock-in", "生态锁定", "switching cost", "转换成本", "repeat purchase", "复购"], True),
     ("治理合规", "governance", ["治理", "内控", "关联交易", "合规", "监管", "许可", "处罚"], False),
@@ -62,6 +64,16 @@ _VARIABLE_METRIC_WHITELIST: dict[str, set[str]] = {
         "ocf_net_income",
         "fcf_coverage",
     },
+    "资本开支强度": {
+        "capital_expenditure",
+        "capex",
+        "capex_intensity",
+    },
+    "云业务增长": {
+        "cloud_revenue",
+        "cloud_growth",
+        "cloud_segment_revenue",
+    },
     "负债压力": {
         "debt_to_asset_ratio",
         "asset_liability_ratio",
@@ -72,6 +84,8 @@ _VARIABLE_METRIC_WHITELIST: dict[str, set[str]] = {
         "quick_ratio",
         "cash_balance",
         "net_debt",
+        "total_liabilities",
+        "liabilities",
     },
     "行业竞争": {
         "market_share",
@@ -152,7 +166,11 @@ _WEAK_VARIABLE_TOKENS = [
 ]
 
 _COMPLETE_METRIC_PATTERN = re.compile(
-    r"\d[\d,]*(?:\.\d+)?\s*(?:亿元|万元|百万|千元|美元|人民币|港元|%|百分点|pct|倍)",
+    r"\d[\d,]*(?:\.\d+)?\s*(?:亿元|万元|百万|千元|美元|人民币|港元|%|百分点|pct|倍|million|billion)",
+    re.IGNORECASE,
+)
+_CONTENT_COMPLETE_AMOUNT_PATTERN = re.compile(
+    r"\d[\d,]*(?:\.\d+)?\s*(?:亿元|万元|百万|千元|美元|人民币|港元|million|billion)",
     re.IGNORECASE,
 )
 
@@ -294,7 +312,27 @@ def _is_structured_metric_evidence(item: Evidence) -> bool:
         return False
     if any(token in item.content for token in _WEAK_VARIABLE_TOKENS):
         return False
+    if item.source_tier == "content" and not _CONTENT_COMPLETE_AMOUNT_PATTERN.search(item.content):
+        return False
     return bool(_COMPLETE_METRIC_PATTERN.search(item.content))
+
+
+def _is_trustworthy_official_fallback(item: Evidence) -> bool:
+    if item.source_tier not in {"official", "company_ir"}:
+        return False
+    if item.is_noise or item.is_truncated or item.cross_entity_contamination or not item.can_enter_main_chain:
+        return False
+    if item.evidence_type != "data" or item.metric_name:
+        return False
+    if not item.period or len(item.content) >= 120:
+        return False
+    if _is_long_mixed_summary(item):
+        return False
+    if sum(1 for token in _BUSINESS_DIMENSION_TOKENS if token.lower() in item.content.lower() or token in item.content) > 1:
+        return False
+    notes = " ".join(item.quality_notes).lower()
+    has_official_note = "official" in notes or "semi_structured" in notes or "complete_official_metric" in notes
+    return has_official_note and bool(_COMPLETE_METRIC_PATTERN.search(item.content))
 
 
 def _normalized_metric_name(item: Evidence) -> str | None:
@@ -368,6 +406,8 @@ def _variable_match_score(item: Evidence, name: str, keywords: list[str], requir
     if requires_structured_metric:
         if _is_long_mixed_summary(item):
             return None
+        if _is_trustworthy_official_fallback(item):
+            return 80
         if not _is_structured_metric_evidence(item):
             return None
         return 20

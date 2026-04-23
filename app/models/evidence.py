@@ -35,6 +35,11 @@ class Evidence(BaseModel):
     period: str | None = None
     segment: str | None = None
     comparison_type: str | None = None
+    yoy_qoq_flag: str | None = None
+    comparison_value: str | float | None = None
+    currency: str | None = None
+    entity: str | None = None
+    source_type: str | None = None
     source_page: int | None = None
     source_table_id: str | None = None
     extraction_confidence: float | None = None

@@ -41,6 +41,8 @@ def should_fetch(url: str | None, source_score: float) -> bool:
         return False
     if lowered.endswith(".pdf") or ".pdf?" in lowered:
         return False
+    if lowered.endswith(".json") or "/api/" in lowered:
+        return False
     domain = _domain(url)
     return not any(skip_domain in domain for skip_domain in SKIP_DOMAINS)
 
@@ -57,7 +59,8 @@ def fetch_full_content(url: str, timeout: int = 12) -> str | None:
             ),
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
-        response = httpx.get(url, timeout=timeout, follow_redirects=True, headers=headers)
+        with httpx.Client(trust_env=False, follow_redirects=True) as client:
+            response = client.get(url, timeout=timeout, headers=headers)
         if response.status_code != 200:
             return None
         soup = BeautifulSoup(response.text, "html.parser")

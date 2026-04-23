@@ -11,6 +11,8 @@ class ContentFetcherTest(unittest.TestCase):
     def test_should_fetch_only_high_score_non_pdf_non_paywall_sources(self) -> None:
         self.assertTrue(should_fetch("https://finance.test/article", 0.7))
         self.assertFalse(should_fetch("https://finance.test/report.pdf", 0.9))
+        self.assertFalse(should_fetch("https://data.sec.gov/submissions/CIK0001577552.json", 0.9))
+        self.assertFalse(should_fetch("https://data.sec.gov/api/xbrl/companyfacts/CIK0001577552.json", 0.9))
         self.assertFalse(should_fetch("https://finance.test/article", 0.49))
         self.assertFalse(should_fetch("https://www.reuters.com/markets/article", 0.9))
 

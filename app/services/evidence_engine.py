@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from app.models.source import Source
 from app.models.source import SourceTier
 from app.models.topic import Topic
+from app.services.listing_status_service import get_known_entity_aliases
 
 _ENTITY_ALIASES = {
     "拼多多": ["拼多多", "PDD", "PDD Holdings", "Temu", "多多买菜"],
@@ -260,7 +261,8 @@ _ENTITY_OFFICIAL_DOMAIN_CACHE: dict[str, set[str]] = {}
 
 def get_entity_aliases(topic: Topic) -> list[str]:
     entity = topic.entity or topic.topic
-    aliases = _ENTITY_ALIASES.get(entity, [entity])
+    aliases = set(get_known_entity_aliases(entity))
+    aliases.update(_ENTITY_ALIASES.get(entity, [entity]))
     return [alias for alias in aliases if alias]
 
 
@@ -314,7 +316,8 @@ def _domain_brand_match(entity: str | None, domain: str, title: str = "", conten
         return True
     if not entity:
         return False
-    aliases = _ENTITY_ALIASES.get(entity, [entity])
+    aliases = set(get_known_entity_aliases(entity))
+    aliases.update(_ENTITY_ALIASES.get(entity, [entity]))
     for alias in aliases:
         alias_compact = _compact_brand(alias)
         if len(alias_compact) >= 4 and alias_compact in domain_compact:
@@ -396,7 +399,8 @@ def classify_source_origin_v2(
         score += 0.24
         signals.append("known_company_domain")
 
-    aliases = _ENTITY_ALIASES.get(entity or "", [entity] if entity else [])
+    aliases = set(get_known_entity_aliases(entity))
+    aliases.update(_ENTITY_ALIASES.get(entity or "", [entity] if entity else []))
     title_entity_match = any(alias and alias.lower() in title_text for alias in aliases)
     body_entity_match = any(alias and alias.lower() in lowered_content for alias in aliases)
     if title_entity_match:

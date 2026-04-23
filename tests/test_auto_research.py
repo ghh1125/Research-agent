@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from app.agent.steps.auto_research import auto_research_loop
+from app.agent.steps.auto_research import auto_research_loop, build_official_target_candidates, mark_official_target_sources
 from app.models.judgment import ConfidenceBasis, EvidenceGap, Judgment, ResearchAction
 from app.models.question import Question
 from app.models.source import Source
@@ -12,6 +12,89 @@ from app.models.topic import Topic
 
 
 class AutoResearchLoopTest(unittest.TestCase):
+    def test_builds_generic_official_target_candidates_without_company_whitelist(self) -> None:
+        topic = Topic(
+            id="topic_001",
+            query="研究阿里巴巴财务质量",
+            topic="阿里巴巴财务质量",
+            goal="判断是否值得研究",
+            type="company",
+            entity="阿里巴巴",
+            research_object_type="listed_company",
+            listing_status="listed",
+            market_type="US",
+        )
+        questions = [Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1, framework_type="financial")]
+        action = ResearchAction(
+            id="a1",
+            priority="high",
+            objective="补齐官方财务来源",
+            reason="缺少官方源",
+            required_data=["财报"],
+            query_templates=["{entity} investor relations quarterly results"],
+            source_targets=["official filings", "investor relations"],
+        )
+
+        candidates = build_official_target_candidates(topic, questions, action, start_index=1)
+
+        self.assertGreaterEqual(len(candidates), 5)
+        self.assertTrue(all(item.is_official_target_source for item in candidates))
+        self.assertTrue(any("investor" in (item.url or "").lower() for item in candidates))
+        self.assertTrue(any("sec.gov" in (item.url or "").lower() for item in candidates))
+        self.assertTrue(all(item.target_reason for item in candidates))
+
+    def test_marks_aggregator_results_as_rejected_official_targets(self) -> None:
+        topic = Topic(
+            id="topic_001",
+            query="研究公司财务",
+            topic="公司财务",
+            goal="判断是否值得研究",
+            type="company",
+            entity="测试公司",
+        )
+        action = ResearchAction(
+            id="a1",
+            priority="high",
+            objective="补齐官方财务来源",
+            reason="缺少官方源",
+            required_data=["财报"],
+            query_templates=["{entity} 财报"],
+            source_targets=["official filings", "investor relations"],
+        )
+        sources = [
+            Source(
+                id="s1",
+                question_id="q1",
+                title="测试公司 Annual Report Mirror",
+                url="https://www.annualreports.com/Company/test",
+                source_type="website",
+                provider="fixture",
+                source_origin_type="aggregator",
+                tier=SourceTier.TIER2,
+                content="测试公司 annual report mirror.",
+            ),
+            Source(
+                id="s2",
+                question_id="q1",
+                title="测试公司 Investor Relations",
+                url="https://investors.testcompany.com/results",
+                source_type="company",
+                provider="fixture",
+                source_origin_type="company_ir",
+                tier=SourceTier.TIER1,
+                content="测试公司 Investor Relations quarterly results.",
+            ),
+        ]
+
+        marked, stats = mark_official_target_sources(sources, topic, action)
+
+        self.assertFalse(marked[0].is_official_target_source)
+        self.assertEqual(marked[0].rejected_reason, "site_role_not_official")
+        self.assertTrue(marked[1].is_official_target_source)
+        self.assertEqual(stats["official_candidates"], 2)
+        self.assertEqual(stats["targetable"], 1)
+        self.assertEqual(stats["rejected"], 1)
+
     @patch("app.agent.steps.reason.call_llm", side_effect=RuntimeError("skip llm in unit test"))
     def test_low_confidence_with_action_triggers_one_round(self, reason_llm_mock) -> None:
         topic = Topic(

@@ -94,6 +94,41 @@ class EvidenceEngineTest(unittest.TestCase):
         self.assertFalse(is_usable_source(sources[0], topic))
         self.assertFalse(is_usable_source(sources[1], topic))
 
+    def test_rank_sources_keeps_official_source_with_resolved_english_alias(self) -> None:
+        topic = Topic(
+            id="topic_baba",
+            query="研究阿里巴巴财务质量、现金流、估值和行业竞争",
+            entity="阿里巴巴",
+            topic="阿里巴巴基本面",
+            goal="判断财务质量",
+            type="company",
+            research_object_type="listed_company",
+            listing_status="listed",
+            market_type="US",
+        )
+        source = Source(
+            id="s1",
+            question_id="q1",
+            title="Alibaba Group Holding Limited SEC EDGAR submissions",
+            url="https://data.sec.gov/submissions/CIK0001577552.json",
+            source_type="regulatory",
+            provider="sec_edgar",
+            content=(
+                "Alibaba Group Holding Limited SEC EDGAR submissions official disclosure. "
+                "Revenue: CNY996347 million in FY2025. "
+                "Operating cash flow: CNY163509 million in FY2025. "
+                "Net income: CNY130109 million in FY2025."
+            ),
+            source_origin_type="official_disclosure",
+        )
+
+        ranked = rank_sources([source], topic, limit=1)
+
+        self.assertEqual([item.id for item in ranked], ["s1"])
+        self.assertTrue(ranked[0].contains_entity)
+        self.assertEqual(ranked[0].tier, SourceTier.TIER1)
+        self.assertGreaterEqual(ranked[0].source_score or 0, 0.22)
+
     def test_noise_filter_detects_html_navigation(self) -> None:
         self.assertTrue(looks_like_noise("<nav>首页 登录 注册</nav>"))
 

@@ -515,6 +515,8 @@ def extract_evidence(
         if is_official_financial_source(source):
             official_items = extract_official_financial_evidence(source, topic, questions, start_index=len(candidates) + 1)
             if official_items:
+                if any(item.cross_entity_contamination for item in official_items):
+                    continue
                 candidates.extend(
                     item.model_copy(update={"id": "pending"})
                     for item in official_items

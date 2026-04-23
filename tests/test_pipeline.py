@@ -89,6 +89,9 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("关键变量", result["report"].markdown)
         self.assertIn("多角色视角", result["report"].markdown)
         self.assertIn("投资层判断", result["report"].markdown)
+        self.assertIn("OFFICIAL_SOURCES_FOUND", judgment.debug_observability)
+        self.assertIn("VARIABLE_INPUT_COUNT", judgment.debug_observability)
+        self.assertIn("JUDGMENT_ALLOWED_EVIDENCE_COUNT", judgment.debug_observability)
         self.assertTrue(set(judgment.conclusion_evidence_ids).issubset(evidence_ids))
         for risk_item in judgment.risk:
             self.assertTrue(set(risk_item.evidence_ids).issubset(evidence_ids))

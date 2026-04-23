@@ -102,6 +102,48 @@ class OfficialDocumentExtractorTest(unittest.TestCase):
         self.assertEqual(by_metric["free_cash_flow"].quality_score, 0.7)
         self.assertIn("official_structured_financial", by_metric["revenue"].quality_notes)
 
+    def test_official_html_and_filing_blocks_extract_short_field_evidence(self) -> None:
+        topic = self._alibaba_topic()
+        question = Question(id="q1", topic_id=topic.id, content="阿里云、现金流、利润和资本开支如何", priority=1, framework_type="financial")
+        source = Source(
+            id="s1",
+            question_id="q1",
+            title="Alibaba Group Q3 FY2026 Quarterly Results Highlights",
+            url="https://www.examplegroup.com/investor-relations/quarterly-results",
+            source_type="company",
+            provider="fixture",
+            source_origin_type="company_ir",
+            tier=SourceTier.TIER1,
+            content=(
+                "Earnings Release and Investor Relations Highlights. "
+                "In Q3 FY2026, Cloud revenue grew 35% YoY. "
+                "Revenue: RMB260,000 million, up 8% year-over-year. "
+                "Adjusted EBITA: RMB52,000 million. "
+                "Operating cash flow: RMB42,000 million. "
+                "Free cash flow: RMB23,000 million. "
+                "Capital expenditures: RMB19,000 million. "
+                "Diluted EPS was RMB2.87."
+            ),
+        )
+
+        evidence = extract_official_financial_evidence(source, topic, [question])
+        by_metric = {item.metric_name: item for item in evidence}
+
+        self.assertGreaterEqual(len(evidence), 6)
+        self.assertIn("cloud_revenue", by_metric)
+        self.assertIn("revenue", by_metric)
+        self.assertIn("adjusted_ebita", by_metric)
+        self.assertIn("operating_cash_flow", by_metric)
+        self.assertIn("free_cash_flow", by_metric)
+        self.assertIn("capex", by_metric)
+        self.assertIn("diluted_eps", by_metric)
+        self.assertLessEqual(max(len(item.content) for item in evidence), 120)
+        self.assertEqual(by_metric["cloud_revenue"].period, "FY2026Q3")
+        self.assertEqual(by_metric["cloud_revenue"].comparison_type, "yoy")
+        self.assertEqual(by_metric["cloud_revenue"].yoy_qoq_flag, "yoy")
+        self.assertEqual(by_metric["revenue"].currency, "RMB")
+        self.assertEqual(by_metric["revenue"].source_type, "official")
+
     def test_extract_evidence_prefers_official_financial_channel_for_official_sources(self) -> None:
         topic = self._alibaba_topic()
         questions = [

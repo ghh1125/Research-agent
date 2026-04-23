@@ -114,6 +114,70 @@ def _compact_metadata(row: dict, keys: list[str]) -> str:
     return "；".join(parts)
 
 
+def _httpx_get_json(url: str, headers: dict[str, str], timeout: float) -> dict:
+    import httpx
+
+    with httpx.Client(trust_env=False) as client:
+        response = client.get(url, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+
+def _latest_sec_fact(facts: dict, concepts: list[str]) -> tuple[float, str, str] | None:
+    for concept in concepts:
+        fact = facts.get(concept)
+        if not fact:
+            continue
+        units = fact.get("units", {})
+        for unit in ["CNY", "USD", "CNY/shares", "USD/shares", "shares"]:
+            rows = [
+                row
+                for row in units.get(unit, [])
+                if row.get("val") is not None and row.get("form") in {"20-F", "10-K", "10-Q", "6-K"}
+            ]
+            if not rows:
+                continue
+            rows.sort(key=lambda row: (str(row.get("end") or ""), str(row.get("filed") or "")), reverse=True)
+            latest = rows[0]
+            value = latest["val"]
+            period = f"FY{latest.get('fy')}" if latest.get("fp") == "FY" and latest.get("fy") else str(latest.get("end") or latest.get("fy") or "")
+            return float(value), unit, period
+    return None
+
+
+def _format_sec_amount(value: float, unit: str) -> tuple[str, str]:
+    if "/shares" in unit or unit == "shares":
+        return f"{value:g}", unit
+    return f"{value / 1_000_000:g}", "million"
+
+
+def _sec_company_facts_lines(facts: dict) -> list[str]:
+    concept_map = [
+        ("Revenue", ["Revenues", "SalesRevenueNet"]),
+        ("Operating income", ["OperatingIncomeLoss"]),
+        ("Net income", ["NetIncomeLoss", "NetIncomeLossAvailableToCommonStockholdersBasic"]),
+        ("Operating cash flow", ["NetCashProvidedByUsedInOperatingActivities", "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"]),
+        ("Capital expenditures", ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireOtherPropertyPlantAndEquipment"]),
+        ("Diluted EPS", ["EarningsPerShareDiluted"]),
+        ("Cash and cash equivalents", ["CashAndCashEquivalentsAtCarryingValue"]),
+        ("Total liabilities", ["Liabilities", "LiabilitiesCurrent"]),
+    ]
+    lines: list[str] = []
+    for label, concepts in concept_map:
+        fact = _latest_sec_fact(facts, concepts)
+        if fact is None:
+            continue
+        value, unit, period = fact
+        value_text, metric_unit = _format_sec_amount(value, unit)
+        currency = unit.split("/")[0] if unit in {"CNY", "USD", "CNY/shares", "USD/shares"} else ""
+        prefix = f"{currency}" if currency else ""
+        if metric_unit == "million":
+            lines.append(f"{label}: {prefix}{value_text} million in {period}.")
+        else:
+            lines.append(f"{label} was {prefix}{value_text} in {period}.")
+    return lines
+
+
 class AkshareSupplementalProvider:
     name = "akshare"
 
@@ -219,18 +283,11 @@ class SecEdgarSupplementalProvider:
             return ProviderSearchResult(provider=self.name, status="empty")
         url = f"https://data.sec.gov/submissions/CIK{cik}.json"
         try:
-            import httpx
-
-            response = httpx.get(
-                url,
-                headers={
-                    "User-Agent": f"research-agent {self.user_agent_email}",
-                    "Accept-Encoding": "gzip, deflate",
-                },
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
+            headers = {
+                "User-Agent": f"research-agent {self.user_agent_email}",
+                "Accept-Encoding": "gzip, deflate",
+            }
+            data = _httpx_get_json(url, headers=headers, timeout=self.timeout)
         except Exception as exc:
             return ProviderSearchResult(provider=self.name, status="error", error=str(exc))
 
@@ -242,9 +299,17 @@ class SecEdgarSupplementalProvider:
             f"{form}@{filing_dates[index] if index < len(filing_dates) else 'unknown'}"
             for index, form in enumerate(forms)
         )
+        fact_lines: list[str] = []
+        facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+        try:
+            facts_payload = _httpx_get_json(facts_url, headers=headers, timeout=self.timeout)
+            fact_lines = _sec_company_facts_lines(facts_payload.get("facts", {}).get("us-gaap", {}))
+        except Exception:
+            fact_lines = []
         content = (
             f"{name} SEC EDGAR submissions 官方披露入口：CIK={cik}；recent_filings={form_summary or '暂无 recent filing 摘要'}。"
             "该来源来自 SEC data.sec.gov，可用于后续查找 10-K、10-Q、8-K 与 XBRL company facts。"
+            + (" ".join(fact_lines) if fact_lines else "")
         )
         return ProviderSearchResult(
             provider=self.name,

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import quote_plus
 
 from app.agent.steps.extract import extract_evidence
 from app.agent.steps.reason import reason_and_generate
 from app.agent.steps.variable import normalize_variables
+from app.agent.utils.query_builder import ENGLISH_ENTITY_ALIASES
 from app.config import get_settings
 from app.models.evidence import Evidence
 from app.models.judgment import AutoResearchTrace, Judgment, ResearchAction
 from app.models.question import Question
-from app.models.source import Source
+from app.models.source import Source, SourceTier
 from app.models.topic import Topic
 from app.models.variable import ResearchVariable
 from app.services.content_fetcher import enrich_sources_content
@@ -59,6 +61,223 @@ def _existing_urls(sources: list[Source]) -> set[str]:
 def _is_pdf_url(url: str | None, title: str) -> bool:
     text = f"{url or ''} {title}".lower()
     return ".pdf" in text or "pdf" in text
+
+
+def _official_target_requested(action: ResearchAction) -> bool:
+    target_text = " ".join(action.source_targets + action.target_sources + action.required_data).lower()
+    return any(
+        token in target_text
+        for token in ["official", "filing", "investor", "regulatory", "annual report", "财报", "公告"]
+    )
+
+
+def _entity_name_candidates(topic: Topic) -> list[str]:
+    entity = topic.entity or topic.topic
+    candidates = [entity]
+    english_alias = ENGLISH_ENTITY_ALIASES.get(entity)
+    if english_alias:
+        candidates.insert(0, english_alias)
+    symbol = getattr(topic, "symbol", None)
+    if symbol:
+        candidates.append(str(symbol).split(".")[0])
+    deduped: list[str] = []
+    for item in candidates:
+        text = str(item or "").strip()
+        if text and text not in deduped:
+            deduped.append(text)
+    return deduped
+
+
+def _domain_slug_candidates(topic: Topic) -> list[str]:
+    slugs: list[str] = []
+    for name in _entity_name_candidates(topic):
+        ascii_name = "".join(char.lower() if char.isalnum() and ord(char) < 128 else " " for char in name)
+        tokens = [token for token in ascii_name.split() if token not in {"group", "holdings", "holding", "inc", "corp", "corporation", "limited", "ltd", "com"}]
+        if not tokens:
+            continue
+        base = "".join(tokens)
+        spaced = "-".join(tokens)
+        for candidate in [base, spaced, f"{base}group", f"{base}holdings"]:
+            if len(candidate) >= 3 and candidate not in slugs:
+                slugs.append(candidate)
+    return slugs[:6]
+
+
+def build_official_target_candidates(
+    topic: Topic,
+    questions: list[Question],
+    action: ResearchAction,
+    start_index: int = 1,
+) -> list[Source]:
+    """Generate generic issuer/regulatory target URLs without company-specific whitelists."""
+
+    if not _official_target_requested(action):
+        return []
+
+    question_id = action.question_id or (questions[0].id if questions else "q_auto")
+    entity_names = _entity_name_candidates(topic)
+    search_name = entity_names[0] if entity_names else topic.topic
+    quoted_name = quote_plus(search_name)
+    market_type = getattr(topic, "market_type", "other")
+    candidates: list[tuple[str, str, str, str]] = []
+
+    if market_type in {"US", "other"}:
+        candidates.append(
+            (
+                "SEC EDGAR company filings",
+                f"https://www.sec.gov/edgar/search/#/q={quoted_name}",
+                "regulatory",
+                "sec_filing_search",
+            )
+        )
+    if market_type in {"HK", "other"}:
+        candidates.append(
+            (
+                "HKEXnews issuer filings",
+                f"https://www.hkexnews.hk/search/titlesearch.xhtml?lang=en&keyword={quoted_name}",
+                "regulatory",
+                "hkex_filing_search",
+            )
+        )
+
+    for slug in _domain_slug_candidates(topic):
+        candidates.extend(
+            [
+                (f"{search_name} investor relations", f"https://ir.{slug}.com", "company_ir", "ir_subdomain"),
+                (f"{search_name} investors", f"https://investors.{slug}.com", "company_ir", "investors_subdomain"),
+                (f"{search_name} investor relations", f"https://www.{slug}.com/investor-relations", "company_ir", "investor_path"),
+                (f"{search_name} financial reports", f"https://www.{slug}.com/investors", "company_ir", "investors_path"),
+                (f"{search_name} newsroom", f"https://www.{slug}.com/newsroom", "company_ir", "corporate_newsroom"),
+            ]
+        )
+
+    sources: list[Source] = []
+    seen_urls: set[str] = set()
+    for title, url, origin, reason in candidates:
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        sources.append(
+            Source(
+                id=f"s{start_index + len(sources)}",
+                question_id=question_id,
+                flow_type="fact",
+                search_query=action.search_query or (action.query_templates[0] if action.query_templates else None),
+                title=title,
+                url=url,
+                source_type="regulatory" if origin == "regulatory" else "company",
+                provider="official_target_discovery",
+                source_origin_type=origin,
+                credibility_tier="tier1",
+                tier=SourceTier.TIER1,
+                source_score=0.82 if origin == "company_ir" else 0.9,
+                source_rank_reason=reason,
+                contains_entity=True,
+                is_recent=True,
+                is_official_target_source=True,
+                target_reason=reason,
+                content=(
+                    f"{search_name} official target source candidate for investor relations, "
+                    "annual report, quarterly results, earnings release, filing, revenue, "
+                    "operating cash flow, free cash flow, capex, and presentation documents."
+                ),
+            )
+        )
+    return sources
+
+
+def mark_official_target_sources(
+    sources: list[Source],
+    topic: Topic,
+    action: ResearchAction,
+) -> tuple[list[Source], dict[str, int]]:
+    """Mark which retrieved sources are eligible official targets for an action."""
+
+    marked: list[Source] = []
+    stats = {"official_candidates": len(sources), "targetable": 0, "rejected": 0}
+    wants_official = _official_target_requested(action)
+    for source in sources:
+        origin = source.source_origin_type
+        if origin == "unknown":
+            origin = classify_source_origin(
+                url=source.url,
+                title=source.title,
+                source_type=source.source_type,
+                content=source.content,
+                entity=topic.entity,
+            )
+        blocked_role = origin in {"aggregator", "professional_media", "research_media", "community", "self_media"}
+        is_targetable = bool(
+            wants_official
+            and not blocked_role
+            and (
+                source.is_official_target_source
+                or source.is_official_pdf
+                or origin in {"company_ir", "official_disclosure", "regulatory"}
+                or source.tier == SourceTier.TIER1
+            )
+        )
+        if is_targetable:
+            stats["targetable"] += 1
+            marked.append(
+                source.model_copy(
+                    update={
+                        "is_official_target_source": True,
+                        "target_reason": source.target_reason or origin,
+                        "rejected_reason": None,
+                    }
+                )
+            )
+        else:
+            rejected_reason = "not_official_action_target" if not wants_official else "site_role_not_official"
+            stats["rejected"] += 1
+            marked.append(
+                source.model_copy(
+                    update={
+                        "is_official_target_source": False,
+                        "rejected_reason": source.rejected_reason or rejected_reason,
+                    }
+                )
+            )
+    return marked, stats
+
+
+def _official_target_stats(sources: list[Source]) -> dict[str, int]:
+    return {
+        "OFFICIAL_SOURCES_FOUND": len(
+            [
+                item
+                for item in sources
+                if item.source_origin_type in {"company_ir", "official_disclosure", "regulatory"}
+                or item.is_official_pdf
+                or item.is_official_target_source
+            ]
+        ),
+        "OFFICIAL_SOURCES_ACCEPTED": len([item for item in sources if item.is_official_target_source]),
+        "OFFICIAL_SOURCES_REJECTED": len([item for item in sources if item.rejected_reason]),
+    }
+
+
+def _official_evidence_stats(evidence: list[Evidence]) -> dict[str, int]:
+    official_items = [
+        item
+        for item in evidence
+        if item.source_tier == "official" or "official_structured_financial" in (item.quality_notes or [])
+    ]
+    return {
+        "OFFICIAL_EVIDENCE_EXTRACTED": len([item for item in official_items if item.can_enter_main_chain]),
+        "OFFICIAL_EVIDENCE_REJECTED": len([item for item in official_items if not item.can_enter_main_chain]),
+    }
+
+
+def _variable_stats(evidence: list[Evidence], variables: list[ResearchVariable]) -> dict[str, int | str]:
+    accepted_ids = {evidence_id for variable in variables for evidence_id in variable.evidence_ids}
+    rejected = len([item for item in evidence if item.id not in accepted_ids])
+    return {
+        "VARIABLE_INPUT_COUNT": len(evidence),
+        "VARIABLE_ACCEPTED_COUNT": len(accepted_ids),
+        "VARIABLE_REJECTED_REASON": f"not_strict_variable_input={rejected}",
+    }
 
 
 def retrieve_from_action(
@@ -142,9 +361,21 @@ def retrieve_from_action(
         if len(sources) >= max_sources:
             break
 
+    sources, _target_stats = mark_official_target_sources(sources, topic, action)
+    if _official_target_requested(action) and not any(item.is_official_target_source for item in sources):
+        remaining_slots = max(max_sources - len(sources), 2)
+        target_candidates = build_official_target_candidates(
+            topic,
+            questions,
+            action,
+            start_index=source_counter,
+        )[:remaining_slots]
+        sources.extend(target_candidates)
+
     ranked_sources = rank_sources(enrich_pdf_sources(sources), topic, max_sources)
     enriched_sources = enrich_sources_content(ranked_sources)
-    return rank_sources(enriched_sources, topic, max_sources), executed_queries
+    ranked_enriched = rank_sources(enriched_sources, topic, max_sources)
+    return ranked_enriched, executed_queries
 
 
 def _renumber_new_evidence(new_evidence: list[Evidence], start_index: int) -> list[Evidence]:
@@ -260,6 +491,11 @@ def auto_research_loop(
                     executed_queries=executed_queries,
                     effectiveness_status="no_new_data",
                     stop_reason="自动补证未检索到新增可用来源",
+                    debug_observability={
+                        **_official_target_stats([]),
+                        **_official_evidence_stats([]),
+                        **_variable_stats(current_evidence, current_variables),
+                    },
                 )
             )
             break
@@ -283,6 +519,11 @@ def auto_research_loop(
                     new_source_ids=[item.id for item in round_sources],
                     effectiveness_status="no_new_data",
                     stop_reason="新增来源未提取出有效证据",
+                    debug_observability={
+                        **_official_target_stats(round_sources),
+                        **_official_evidence_stats([]),
+                        **_variable_stats(current_evidence, current_variables),
+                    },
                 )
             )
             break
@@ -328,6 +569,11 @@ def auto_research_loop(
                     if is_effective
                     else "新增证据未覆盖本轮目标证据缺口，保持原判断置信度"
                 ),
+                debug_observability={
+                    **_official_target_stats(round_sources),
+                    **_official_evidence_stats(renumbered),
+                    **_variable_stats(current_evidence, current_variables),
+                },
             )
         )
 

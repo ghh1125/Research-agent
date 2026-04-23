@@ -7,7 +7,7 @@ from app.models.evidence import Evidence
 from app.models.question import Question
 from app.models.source import Source
 from app.models.topic import Topic
-from app.services.listing_status_service import _LISTED_COMPANY_ALIASES
+from app.services.listing_status_service import _LISTED_COMPANY_ALIASES, get_known_entity_aliases
 
 _OFFICIAL_ORIGINS = {"company_ir", "official_disclosure", "regulatory"}
 
@@ -25,7 +25,7 @@ _METRIC_PATTERNS = [
     (
         "revenue",
         ["revenue", "total revenue", "营业收入", "总收入"],
-        re.compile(r"(?:total\s+)?revenue\s+(?:was|of|reached)?\s*(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"(?:total\s+)?revenue\s*(?::|was|of|reached)?\s*(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(%|million|billion|亿元|万元)?", re.I),
     ),
     (
         "cmr",
@@ -40,17 +40,22 @@ _METRIC_PATTERNS = [
     (
         "adjusted_ebita",
         ["adjusted EBITA", "经调整 EBITA"],
-        re.compile(r"adjusted\s+EBITA\s+(?:was|of)?\s*(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"adjusted\s+EBITA\s*(?::|was|of)?\s*(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(%|million|billion|亿元|万元)?", re.I),
+    ),
+    (
+        "net_income",
+        ["net income", "净利润"],
+        re.compile(r"net income\s*(?::|was|of)?\s*(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(%|million|billion|亿元|万元)?", re.I),
     ),
     (
         "operating_income",
         ["operating income", "经营利润"],
-        re.compile(r"operating income\s+(?:was|of)?\s*(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"operating income\s*(?::|was|of)?\s*(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(%|million|billion|亿元|万元)?", re.I),
     ),
     (
         "operating_cash_flow",
         ["operating cash flow", "net cash provided by operating activities", "经营活动产生的现金流量净额"],
-        re.compile(r"(net cash provided by operating activities|operating cash flow|经营活动产生的现金流量净额)[^.。；;]{0,60}?(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"(net cash provided by operating activities|operating cash flow|经营活动产生的现金流量净额)[^.。；;]{0,60}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
     ),
     (
         "free_cash_flow",
@@ -60,32 +65,67 @@ _METRIC_PATTERNS = [
     (
         "capex",
         ["capital expenditures", "capex", "资本开支"],
-        re.compile(r"(capital expenditures|capex|资本开支)[^.。；;]{0,60}?(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"(capital expenditures|capex|资本开支)[^.。；;]{0,60}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+    ),
+    (
+        "margin",
+        ["margin", "毛利率", "净利率"],
+        re.compile(r"(gross margin|net margin|operating margin|毛利率|净利率)[^.。；;]{0,60}?([\d,]+(?:\.\d+)?)\s*%", re.I),
+    ),
+    (
+        "diluted_eps",
+        ["diluted EPS", "摊薄每股收益"],
+        re.compile(r"(diluted EPS|摊薄每股收益)[^.。；;]{0,40}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)", re.I),
+    ),
+    (
+        "cash_balance",
+        ["cash and cash equivalents", "现金及现金等价物", "现金余额"],
+        re.compile(r"(cash and cash equivalents|现金及现金等价物|现金余额)[^.。；;]{0,60}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+    ),
+    (
+        "total_liabilities",
+        ["total liabilities", "liabilities", "负债合计"],
+        re.compile(r"(total liabilities|liabilities|负债合计)[^.。；;]{0,60}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
     ),
     (
         "share_repurchase",
         ["share repurchases", "share repurchase", "股份回购"],
-        re.compile(r"(share repurchases?|股份回购|回购)[^.。；;]{0,80}?(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"(share repurchases?|股份回购|回购)[^.。；;]{0,80}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
     ),
     (
         "cloud_revenue",
         ["cloud revenue", "Cloud Intelligence Group revenue", "云业务收入"],
-        re.compile(r"(Cloud Intelligence Group revenue|cloud revenue|云业务收入)[^.。；;]{0,60}?(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"(Cloud Intelligence Group revenue|cloud revenue|云业务收入)[^.。；;]{0,60}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(%|million|billion|亿元|万元)?", re.I),
     ),
     (
         "aidc_revenue",
         ["AIDC revenue", "International Digital Commerce revenue"],
-        re.compile(r"(AIDC revenue|International Digital Commerce[^.。；;]{0,30}revenue)[^.。；;]{0,60}?(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"(AIDC revenue|International Digital Commerce[^.。；;]{0,30}revenue)[^.。；;]{0,60}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
     ),
     (
         "local_services_revenue",
         ["local services revenue", "本地生活收入"],
-        re.compile(r"(local services revenue|本地生活收入)[^.。；;]{0,60}?(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"(local services revenue|本地生活收入)[^.。；;]{0,60}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
     ),
     (
         "cainiao_revenue",
         ["Cainiao revenue", "菜鸟收入"],
-        re.compile(r"(Cainiao revenue|菜鸟收入)[^.。；;]{0,60}?(?:RMB|US\$|USD|HK\$)?\s*([\d,]+(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+        re.compile(r"(Cainiao revenue|菜鸟收入)[^.。；;]{0,60}?(?:RMB|CNY|US\$|USD|HK\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(million|billion|亿元|万元)?", re.I),
+    ),
+    (
+        "order_volume",
+        ["order volume", "orders", "订单量"],
+        re.compile(r"(order volume|orders|订单量)[^.。；;]{0,60}?([\d,]+(?:\.\d+)?)\s*(%|million|billion|亿元|万元)?", re.I),
+    ),
+    (
+        "monthly_active_users",
+        ["monthly active users", "MAU", "月活跃用户"],
+        re.compile(r"(monthly active users|MAU|月活跃用户)[^.。；;]{0,60}?([\d,]+(?:\.\d+)?)\s*(%|million|billion|亿元|万元)?", re.I),
+    ),
+    (
+        "take_rate",
+        ["take rate", "货币化率"],
+        re.compile(r"(take rate|货币化率)[^.。；;]{0,60}?([\d,]+(?:\.\d+)?)\s*%", re.I),
     ),
 ]
 
@@ -134,7 +174,7 @@ def _source_text(source: Source) -> str:
 
 
 def _question_for_metric(metric_name: str, questions: list[Question]) -> str | None:
-    framework = "credit" if metric_name in {"operating_cash_flow", "free_cash_flow", "capex"} else "financial"
+    framework = "credit" if metric_name in {"operating_cash_flow", "free_cash_flow", "capex", "cash_balance", "total_liabilities"} else "financial"
     for question in questions:
         if question.framework_type == framework:
             return question.id
@@ -146,7 +186,7 @@ def _question_for_metric(metric_name: str, questions: list[Question]) -> str | N
 
 def _metric_value(match: re.Match, metric_name: str) -> tuple[float | str, str | None]:
     groups = [item for item in match.groups() if item]
-    numeric = next((item for item in groups if re.fullmatch(r"[\d,]+(?:\.\d+)?", item)), None)
+    numeric = next((item for item in groups if re.fullmatch(r"\d[\d,]*(?:\.\d+)?", item)), None)
     unit = next((item for item in reversed(groups) if item.lower() in {"%", "million", "billion", "亿元", "万元"}), None)
     if numeric is None:
         return "", unit
@@ -155,6 +195,26 @@ def _metric_value(match: re.Match, metric_name: str) -> tuple[float | str, str |
     except Exception:
         value = numeric
     return value, unit
+
+
+def _currency(raw_text: str) -> str | None:
+    if re.search(r"RMB|CNY|人民幣|人民币", raw_text, flags=re.I):
+        return "RMB"
+    if re.search(r"US\$|USD", raw_text, flags=re.I):
+        return "USD"
+    if re.search(r"HK\$", raw_text, flags=re.I):
+        return "HKD"
+    return None
+
+
+def _comparison_value(raw_text: str) -> float | str | None:
+    match = re.search(r"(?:up|increased|grew|down|declined|decreased|增长|下降)[^\d]{0,20}([\d,]+(?:\.\d+)?)\s*%", raw_text, flags=re.I)
+    if not match:
+        return None
+    try:
+        return round(float(match.group(1).replace(",", "")), 4)
+    except Exception:
+        return match.group(1)
 
 
 def _comparison_type(raw_text: str) -> str | None:
@@ -170,6 +230,16 @@ def _comparison_type(raw_text: str) -> str | None:
 
 def _period(source: Source, raw_text: str) -> str | None:
     text = f"{source.title} {source.published_at or ''} {raw_text}"
+    fy_quarter = re.search(r"Q([1-4])\s*FY\s*(20\d{2})", text, flags=re.I)
+    if fy_quarter:
+        return f"FY{fy_quarter.group(2)}Q{fy_quarter.group(1)}"
+    year_quarter = re.search(r"(?:FY\s*)?(20\d{2})\s*Q([1-4])", text, flags=re.I)
+    if year_quarter:
+        prefix = "FY" if re.search(r"FY\s*" + year_quarter.group(1), text, flags=re.I) else ""
+        return f"{prefix}{year_quarter.group(1)}Q{year_quarter.group(2)}"
+    fiscal_year = re.search(r"FY\s*(20\d{2})", raw_text, flags=re.I)
+    if fiscal_year:
+        return f"FY{fiscal_year.group(1)}"
     match = re.search(r"(20\d{2})(?:\s|[-/年])?(?:Q([1-4])|quarter|季度|年)?", text, flags=re.I)
     if match:
         return f"{match.group(1)}Q{match.group(2)}" if match.group(2) else match.group(1)
@@ -177,21 +247,45 @@ def _period(source: Source, raw_text: str) -> str | None:
 
 
 def _raw_excerpt(text: str, match: re.Match) -> str:
-    start = max(0, match.start() - 24)
-    end = min(len(text), match.end() + 80)
+    sentence_start = max(text.rfind(".", 0, match.start()), text.rfind("。", 0, match.start()), text.rfind("；", 0, match.start()), text.rfind(";", 0, match.start()))
+    start = sentence_start + 1 if sentence_start >= 0 else max(0, match.start() - 24)
+    sentence_end_candidates = [index for index in [text.find(".", match.end()), text.find("。", match.end()), text.find("；", match.end()), text.find(";", match.end())] if index >= 0]
+    end = min(sentence_end_candidates) + 1 if sentence_end_candidates else min(len(text), match.end() + 80)
     return re.sub(r"\s+", " ", text[start:end]).strip(" .。；;")
+
+
+def _format_metric_content(
+    metric_name: str,
+    value: float | str,
+    unit: str | None,
+    period: str | None,
+    comparison_type: str | None,
+    currency: str | None,
+    raw_text: str,
+) -> str:
+    label = metric_name.replace("_", " ")
+    value_text = f"{value:g}" if isinstance(value, float) else str(value)
+    prefix = f"{currency}" if currency and unit != "%" else ""
+    unit_text = unit or ""
+    period_text = f" in {period}" if period else ""
+    comparison_text = f" {comparison_type.upper()}" if comparison_type else ""
+    if unit == "%" and comparison_type:
+        return f"{label} changed {value_text}% {comparison_type.upper()}{period_text}."
+    if "grew" in raw_text.lower() or "increased" in raw_text.lower() or "增长" in raw_text:
+        verb = "grew"
+    elif "declined" in raw_text.lower() or "decreased" in raw_text.lower() or "下降" in raw_text:
+        verb = "declined"
+    else:
+        verb = "was"
+    if verb == "was":
+        return f"{label} was {prefix}{value_text} {unit_text}{comparison_text}{period_text}.".replace("  ", " ").strip()
+    return f"{label} {verb} {prefix}{value_text} {unit_text}{comparison_text}{period_text}.".replace("  ", " ").strip()
 
 
 def _aliases_for_entity(entity: str | None) -> set[str]:
     if not entity:
         return set()
-    aliases = {entity}
-    aliases.update(_LISTED_COMPANY_ALIASES.get(entity, []))
-    lowered_entity = entity.lower()
-    for canonical, candidate_aliases in _LISTED_COMPANY_ALIASES.items():
-        if canonical == entity or any(alias.lower() == lowered_entity for alias in candidate_aliases):
-            aliases.add(canonical)
-            aliases.update(candidate_aliases)
+    aliases = set(get_known_entity_aliases(entity))
     return {alias for alias in aliases if alias}
 
 
@@ -225,6 +319,8 @@ def _is_truncated_official_metric(raw_text: str, value: float | str, unit: str |
         return True
     if value == "":
         return True
+    if "eps" in stripped.lower() or "每股收益" in stripped:
+        return False
     if unit is None and re.search(r"(RMB|人民幣|人民币|US\$|USD|HK\$)\s*\d{1,3}(?:\D|$)", stripped, flags=re.I):
         return True
     return False
@@ -279,10 +375,14 @@ def extract_official_financial_evidence(
                 continue
             seen.add(key)
             value, unit = _metric_value(match, metric_name)
+            period = _period(source, raw_text)
+            comparison_type = _comparison_type(raw_text)
+            currency = _currency(raw_text)
             quality, notes = _quality_for_metric(metric_name, raw_text, value, unit)
             is_truncated, contaminated, can_enter_main_chain, guard_notes = _main_chain_guards(raw_text, topic, value, unit)
             if not can_enter_main_chain:
                 quality = min(quality, 0.2)
+            content = _format_metric_content(metric_name, value, unit, period, comparison_type, currency, raw_text)
             evidence.append(
                 Evidence(
                     id=f"e{start_index + len(evidence)}",
@@ -290,7 +390,7 @@ def extract_official_financial_evidence(
                     question_id=_question_for_metric(metric_name, questions),
                     source_id=source.id,
                     flow_type=source.flow_type,
-                    content=raw_text,
+                    content=content[:120],
                     evidence_type="data",
                     stance="neutral",
                     grounded=True,
@@ -309,9 +409,14 @@ def extract_official_financial_evidence(
                     metric_name=metric_name,
                     metric_value=value,
                     unit=unit,
-                    period=_period(source, raw_text),
+                    period=period,
                     segment=_SEGMENT_BY_METRIC.get(metric_name),
-                    comparison_type=_comparison_type(raw_text),
+                    comparison_type=comparison_type,
+                    yoy_qoq_flag=comparison_type,
+                    comparison_value=_comparison_value(raw_text),
+                    currency=currency,
+                    entity=topic.entity or topic.topic,
+                    source_type="official",
                     source_page=source.parsed_pages[0].get("page_number") if source.parsed_pages else None,
                     source_table_id=f"{source.id}:{page_type}:{metric_name}",
                     extraction_confidence=quality,

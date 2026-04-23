@@ -264,6 +264,67 @@ class VariableStepTest(unittest.TestCase):
 
         self.assertIn("现金流质量", {item.name for item in variables})
 
+    def test_trustworthy_official_fallback_creates_cloud_and_capex_variables(self) -> None:
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                source_tier="official",
+                content="Cloud revenue grew 35% YoY in Q3 FY2026.",
+                evidence_type="data",
+                stance="neutral",
+                evidence_score=0.7,
+                quality_score=0.7,
+                quality_notes=["semi_structured_official_metric"],
+                period="FY2026Q3",
+                comparison_type="yoy",
+            ),
+            Evidence(
+                id="e2",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                source_tier="official",
+                content="Capital expenditures were RMB19,000 million in Q3 FY2026.",
+                evidence_type="data",
+                stance="neutral",
+                evidence_score=0.9,
+                quality_score=0.9,
+                quality_notes=["complete_official_metric"],
+                period="FY2026Q3",
+            ),
+        ]
+
+        variables = normalize_variables(evidence)
+        names = {item.name for item in variables}
+
+        self.assertIn("云业务增长", names)
+        self.assertIn("资本开支强度", names)
+
+    def test_untrusted_short_fallback_without_metric_name_cannot_drive_strict_variable(self) -> None:
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                source_tier="content",
+                content="Cloud revenue grew 35% YoY in Q3 FY2026.",
+                evidence_type="data",
+                stance="neutral",
+                evidence_score=0.9,
+                quality_score=0.9,
+                period="FY2026Q3",
+                comparison_type="yoy",
+            )
+        ]
+
+        variables = normalize_variables(evidence)
+
+        self.assertFalse(any(item.name == "云业务增长" for item in variables))
+
     def test_governance_penalty_forces_deteriorating_direction(self) -> None:
         evidence = [
             Evidence(

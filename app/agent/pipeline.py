@@ -333,6 +333,52 @@ def _log_official_evidence_metrics(sources: list[Source], evidence: list[Evidenc
     logger.info("official_document_evidence_metrics", extra=metrics)
 
 
+def _pipeline_debug_observability(
+    sources: list[Source],
+    evidence: list[Evidence],
+    variables: list,
+    judgment,
+) -> dict[str, int | str]:
+    official_sources = [
+        item
+        for item in sources
+        if item.tier == SourceTier.TIER1
+        or item.is_official_pdf
+        or item.source_origin_type in {"company_ir", "official_disclosure", "regulatory"}
+    ]
+    official_evidence = [
+        item
+        for item in evidence
+        if item.source_tier == "official" or "official_structured_financial" in (item.quality_notes or [])
+    ]
+    variable_input_ids = {item.id for item in evidence}
+    variable_accepted_ids = {evidence_id for variable in variables for evidence_id in variable.evidence_ids}
+    variable_rejected = len(variable_input_ids - variable_accepted_ids)
+    return {
+        **(getattr(judgment, "debug_observability", {}) or {}),
+        "OFFICIAL_SOURCES_FOUND": len(official_sources),
+        "OFFICIAL_SOURCES_ACCEPTED": len([item for item in official_sources if not item.rejected_reason]),
+        "OFFICIAL_EVIDENCE_EXTRACTED": len([item for item in official_evidence if item.can_enter_main_chain]),
+        "OFFICIAL_EVIDENCE_REJECTED": len([item for item in official_evidence if not item.can_enter_main_chain]),
+        "VARIABLE_INPUT_COUNT": len(evidence),
+        "VARIABLE_ACCEPTED_COUNT": len(variable_accepted_ids),
+        "VARIABLE_REJECTED_REASON": f"not_strict_variable_input={variable_rejected}",
+    }
+
+
+def _attach_pipeline_debug(judgment, sources: list[Source], evidence: list[Evidence], variables: list):
+    return judgment.model_copy(
+        update={
+            "debug_observability": _pipeline_debug_observability(
+                sources,
+                evidence,
+                variables,
+                judgment,
+            )
+        }
+    )
+
+
 def _peer_comparison_dimensions(rows: list[dict]) -> set[str]:
     covered: set[str] = set()
     for row in rows:
@@ -526,6 +572,7 @@ def research_pipeline(
         judgment = judgment.model_copy(update={"research_actions": actions})
         judgment = apply_investment_layer(topic, questions, evidence, judgment, variables)
         judgment = _attach_peer_comparison_to_judgment(judgment, financial_snapshot)
+        judgment = _attach_pipeline_debug(judgment, sources, evidence, variables)
         roles = synthesize_role_outputs(topic, sources, evidence, variables, judgment)
         report = generate_report(topic, questions, sources, evidence, variables, roles, judgment)
         executive_summary = build_executive_summary(judgment, early_stop_reason)
@@ -575,6 +622,7 @@ def research_pipeline(
     judgment = auto_result.judgment.model_copy(update={"research_actions": auto_result.actions})
     judgment = apply_investment_layer(topic, questions, evidence, judgment, variables)
     judgment = _attach_peer_comparison_to_judgment(judgment, financial_snapshot)
+    judgment = _attach_pipeline_debug(judgment, sources, evidence, variables)
     _log_official_evidence_metrics(sources, evidence, judgment)
     _emit_progress(progress_callback, "investment", "已生成研究流程层面的处理建议。", judgment.investment_decision)
     insufficient_after_auto_research = _effective_evidence_count(evidence) < 3

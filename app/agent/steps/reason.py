@@ -73,6 +73,63 @@ def _validate_evidence_ids(referenced_ids: list[str], evidence_map: dict[str, Ev
     return deduped
 
 
+def _is_main_chain_evidence(item: Evidence, topic: Topic) -> bool:
+    if item.is_noise or item.is_truncated or item.cross_entity_contamination or not item.can_enter_main_chain:
+        return False
+    if not item.grounded:
+        return False
+    is_company_context = topic.type == "company" or getattr(topic, "research_object_type", "unknown") in {"listed_company", "private_company"}
+    if item.source_tier == "content" and is_company_context:
+        return False
+    score = item.evidence_score if item.evidence_score is not None else item.quality_score
+    if score is not None and score < 0.35:
+        return False
+    return True
+
+
+def _main_chain_evidence(evidence: list[Evidence], topic: Topic) -> list[Evidence]:
+    return [item for item in evidence if _is_main_chain_evidence(item, topic)]
+
+
+def _filter_verified_variables(
+    variables: list[ResearchVariable] | None,
+    evidence_map: dict[str, Evidence],
+) -> list[ResearchVariable]:
+    verified: list[ResearchVariable] = []
+    for variable in variables or []:
+        evidence_ids = _validate_evidence_ids(variable.evidence_ids, evidence_map)
+        if not evidence_ids:
+            continue
+        verified.append(variable.model_copy(update={"evidence_ids": evidence_ids}))
+    return verified
+
+
+def _judgment_debug_stats(raw_evidence: list[Evidence], allowed_evidence: list[Evidence]) -> dict[str, int]:
+    return {
+        "JUDGMENT_ALLOWED_EVIDENCE_COUNT": len(allowed_evidence),
+        "JUDGMENT_BLOCKED_EVIDENCE_COUNT": len(raw_evidence) - len(allowed_evidence),
+    }
+
+
+def _blocked_evidence_pressure_tests(raw_evidence: list[Evidence], allowed_evidence: list[Evidence]) -> list[PressureTest]:
+    if allowed_evidence:
+        return []
+    weak_ids = [item.id for item in raw_evidence if item.source_tier == "content"][:5]
+    if not weak_ids:
+        return []
+    return [
+        PressureTest(
+            test_id="pt1",
+            attack_type="weak_source",
+            target="source_quality",
+            fragile_evidence_ids=weak_ids,
+            weakness="原始证据来自弱来源或未进入主判断链，不能支撑方向性判断。",
+            counter_conclusion="需要补齐官方或专业来源结构化证据后，才能提升研究结论强度。",
+            severity="high",
+        )
+    ]
+
+
 def _merge_unknowns(primary: list[str], secondary: list[str], limit: int = 3) -> list[str]:
     merged: list[str] = []
     seen: set[str] = set()
@@ -368,6 +425,9 @@ def _build_conclusion(
     )
 
     if "值得进一步研究" in topic.query or topic.type == "company":
+        if len(evidence) < 2:
+            conclusion_ids = _validate_evidence_ids([item.id for item in evidence[:1]], evidence_map)
+            return "信息不足，暂不形成方向性判断", conclusion_ids
         if len(positive_ids) >= 2:
             conclusion_ids = _validate_evidence_ids(positive_ids + negative_ids[:1], evidence_map)
             conclusion = (
@@ -870,6 +930,7 @@ def _validate_judgment(
     judgment: Judgment,
     evidence_map: dict[str, Evidence],
     confidence_basis: ConfidenceBasis,
+    debug_observability: dict[str, int] | None = None,
 ) -> Judgment:
     """Ensure all judgment references point to real evidence ids."""
 
@@ -942,6 +1003,10 @@ def _validate_judgment(
             "bear_theses": bear_theses,
             "catalysts": catalysts,
             "positioning": positioning,
+            "debug_observability": {
+                **(judgment.debug_observability or {}),
+                **(debug_observability or {}),
+            },
         }
     )
 
@@ -1201,13 +1266,25 @@ def reason_and_generate(
 ) -> Judgment:
     """Generate a bounded judgment based on extracted evidence."""
 
+    raw_evidence = list(evidence)
+    evidence = _main_chain_evidence(raw_evidence, topic)
+    debug_observability = _judgment_debug_stats(raw_evidence, evidence)
+
     if not evidence:
-        return _build_empty_evidence_judgment(topic, questions)
+        judgment = _build_empty_evidence_judgment(topic, questions)
+        return judgment.model_copy(
+            update={
+                "conclusion": "信息不足，证据不足，暂不形成方向性判断",
+                "pressure_tests": _blocked_evidence_pressure_tests(raw_evidence, evidence),
+                "debug_observability": debug_observability,
+            }
+        )
 
     evidence_map = {item.id: item for item in evidence}
+    verified_variables = _filter_verified_variables(variables, evidence_map)
     evidence_gaps = _build_evidence_gaps(questions, evidence)
     keyword_clusters = _build_keyword_clusters(topic, evidence, evidence_map)
-    llm_judgment = _parse_llm_reasoning(topic, evidence, questions, evidence_gaps, evidence_map, variables)
+    llm_judgment = _parse_llm_reasoning(topic, evidence, questions, evidence_gaps, evidence_map, verified_variables)
 
     if llm_judgment is not None:
         merged_clusters = _merge_clusters(llm_judgment.clusters, keyword_clusters, evidence_map)
@@ -1240,7 +1317,7 @@ def reason_and_generate(
             confidence_basis=confidence_basis,
             research_actions=research_actions,
         )
-        return _validate_judgment(topic, judgment, evidence_map, confidence_basis)
+        return _validate_judgment(topic, judgment, evidence_map, confidence_basis, debug_observability)
 
     conclusion, conclusion_evidence_ids = _build_conclusion(topic, evidence, evidence_map, keyword_clusters)
     validated_conclusion_ids = _validate_evidence_ids(conclusion_evidence_ids, evidence_map)
@@ -1273,4 +1350,4 @@ def reason_and_generate(
         confidence_basis=confidence_basis,
         research_actions=research_actions,
     )
-    return _validate_judgment(topic, judgment, evidence_map, confidence_basis)
+    return _validate_judgment(topic, judgment, evidence_map, confidence_basis, debug_observability)

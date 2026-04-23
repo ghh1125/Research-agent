@@ -65,23 +65,24 @@ def discover_cninfo_announcements(stock_code: str, entity: str, limit: int = 3) 
     try:
         import httpx
 
-        response = httpx.post(
-            CNINFO_ANNOUNCEMENT_API,
-            data={
-                "stock": stock_code,
-                "searchkey": f"{entity} 年报 季报",
-                "category": "",
-                "pageNum": "1",
-                "pageSize": str(max(limit, 3)),
-                "column": "szse",
-                "tabName": "fulltext",
-            },
-            headers={
-                "User-Agent": "Mozilla/5.0 research-agent/0.1",
-                "Referer": "http://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search",
-            },
-            timeout=8,
-        )
+        with httpx.Client(trust_env=False) as client:
+            response = client.post(
+                CNINFO_ANNOUNCEMENT_API,
+                data={
+                    "stock": stock_code,
+                    "searchkey": f"{entity} 年报 季报",
+                    "category": "",
+                    "pageNum": "1",
+                    "pageSize": str(max(limit, 3)),
+                    "column": "szse",
+                    "tabName": "fulltext",
+                },
+                headers={
+                    "User-Agent": "Mozilla/5.0 research-agent/0.1",
+                    "Referer": "http://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search",
+                },
+                timeout=8,
+            )
         response.raise_for_status()
         payload = response.json()
     except Exception:

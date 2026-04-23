@@ -370,6 +370,63 @@ class ReasonStepTest(unittest.TestCase):
         self.assertTrue(any("不同期间" in item for item in judgment.pending_assumptions + judgment.unknown))
         self.assertNotEqual(judgment.confidence_basis.conflict_level, "strong")
 
+    def test_reason_prompt_and_judgment_stats_only_use_main_chain_evidence(self) -> None:
+        topic = Topic(
+            id="topic_008",
+            query="研究阿里巴巴财务质量",
+            topic="阿里巴巴财务质量",
+            goal="判断是否值得研究",
+            type="company",
+            entity="阿里巴巴",
+            research_object_type="listed_company",
+        )
+        questions = [Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1, framework_type="financial")]
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                source_tier="official",
+                evidence_score=0.9,
+                quality_score=0.9,
+                content="Revenue increased 8% YoY to RMB260,000 million in Q3 FY2026.",
+                evidence_type="data",
+                metric_name="revenue",
+                metric_value=260000,
+                unit="million",
+                period="FY2026Q3",
+                comparison_type="yoy",
+            ),
+            Evidence(
+                id="e2",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s2",
+                source_tier="official",
+                evidence_score=0.9,
+                content="BLOCKED_RAW_SNIPPET Alibaba and Baidu merged into one broken paragraph.",
+                evidence_type="data",
+                can_enter_main_chain=False,
+                cross_entity_contamination=True,
+            ),
+        ]
+
+        def fake_llm(prompt: str, temperature: float = 0.1) -> str:
+            self.assertNotIn("BLOCKED_RAW_SNIPPET", prompt)
+            return (
+                '{"conclusion": "信息不足，暂不形成方向性判断", '
+                '"conclusion_evidence_ids": ["e1"], "clusters": [], "risk": [], '
+                '"unknown": [], "confidence": "low"}'
+            )
+
+        with patch("app.agent.steps.reason.call_llm", side_effect=fake_llm):
+            judgment = reason_and_generate(topic, evidence, questions)
+
+        self.assertEqual(judgment.conclusion_evidence_ids, ["e1"])
+        self.assertEqual(judgment.debug_observability["JUDGMENT_ALLOWED_EVIDENCE_COUNT"], 1)
+        self.assertEqual(judgment.debug_observability["JUDGMENT_BLOCKED_EVIDENCE_COUNT"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -133,6 +133,7 @@ class AutoResearchTrace(BaseModel):
     covered_gap_question_ids: list[str] = Field(default_factory=list)
     effectiveness_status: Literal["not_triggered", "effective", "ineffective", "no_new_data"] = "not_triggered"
     stop_reason: str
+    debug_observability: dict[str, int | str] = Field(default_factory=dict)
 
 
 class ResearchScope(BaseModel):
@@ -225,3 +226,4 @@ class Judgment(BaseModel):
     reviewer_comment: str | None = None
     approved_by: str | None = None
     overridden_fields: list[str] = Field(default_factory=list)
+    debug_observability: dict[str, int | str] = Field(default_factory=dict)
