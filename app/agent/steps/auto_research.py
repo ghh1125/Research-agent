@@ -100,6 +100,7 @@ def retrieve_from_action(
                 title=result["title"],
                 source_type=result["source_type"],
                 content=result["content"],
+                entity=topic.entity,
             )
             tier = classify_tier_from_origin(origin)
             draft = Source(
@@ -169,14 +170,24 @@ def _mark_action_status(
     actions: list[ResearchAction],
     selected: list[ResearchAction],
     status: str,
+    status_reason: str | None = None,
 ) -> list[ResearchAction]:
     selected_ids = {item.id for item in selected}
     return [
-        item.model_copy(update={"status": status})
+        item.model_copy(update={"status": status, "status_reason": status_reason})
         if item.id in selected_ids
         else item
         for item in actions
     ]
+
+
+def _no_source_status(selected_actions: list[ResearchAction], executed_queries: list[str]) -> tuple[str, str]:
+    if not executed_queries:
+        return "skipped_duplicate_query", "因与已执行查询高度重复，未重复检索。"
+    target_text = " ".join(target for action in selected_actions for target in action.source_targets + action.target_sources).lower()
+    if "official" in target_text or "investor relations" in target_text or "filing" in target_text:
+        return "skipped_no_official_target_source", "缺少可用官方目标源，暂未形成新增来源。"
+    return "attempted_no_new_evidence", "已执行检索，但没有新增可用来源或证据。"
 
 
 def auto_research_loop(
@@ -239,7 +250,8 @@ def auto_research_loop(
             executed_queries.extend(queries)
 
         if not round_sources:
-            current_actions = _mark_action_status(current_actions, selected_actions, "skipped")
+            action_status, action_reason = _no_source_status(selected_actions, executed_queries)
+            current_actions = _mark_action_status(current_actions, selected_actions, action_status, action_reason)
             trace.append(
                 AutoResearchTrace(
                     round_index=round_index,
@@ -255,7 +267,12 @@ def auto_research_loop(
         extracted = extract_evidence(topic, questions, round_sources)
         renumbered = _renumber_new_evidence(extracted, len(current_evidence) + 1)
         if not renumbered:
-            current_actions = _mark_action_status(current_actions, selected_actions, "skipped")
+            current_actions = _mark_action_status(
+                current_actions,
+                selected_actions,
+                "attempted_low_quality_only",
+                "已检索但仅新增低质量证据，未纳入判断。",
+            )
             current_sources.extend(round_sources)
             trace.append(
                 AutoResearchTrace(
@@ -290,7 +307,12 @@ def auto_research_loop(
             current_judgment = reason_and_generate(topic, current_evidence, questions, current_variables)
             current_actions = current_judgment.research_actions
         else:
-            current_actions = _mark_action_status(current_actions, selected_actions, "skipped")
+            current_actions = _mark_action_status(
+                current_actions,
+                selected_actions,
+                "attempted_but_not_covering_gap",
+                "已执行，但未覆盖目标证据缺口。",
+            )
         trace.append(
             AutoResearchTrace(
                 round_index=round_index,

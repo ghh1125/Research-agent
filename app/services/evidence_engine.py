@@ -11,6 +11,8 @@ from app.models.topic import Topic
 _ENTITY_ALIASES = {
     "拼多多": ["拼多多", "PDD", "PDD Holdings", "Temu", "多多买菜"],
     "宁德时代": ["宁德时代", "CATL"],
+    "腾讯": ["腾讯", "Tencent", "Tencent Holdings", "0700"],
+    "英伟达": ["英伟达", "NVIDIA", "NVDA"],
 }
 
 _TIER1_DOMAINS = [
@@ -21,7 +23,6 @@ _TIER1_DOMAINS = [
     "pddholdings.com",
     "investor.pddholdings.com",
     "ir.tencent.com",
-    "investor.alibaba.com",
     "sse.com.cn",
     "szse.cn",
     "csrc.gov.cn",
@@ -30,19 +31,16 @@ _TIER1_DOMAINS = [
     "hkexnews.hk",
     "nyse.com",
     "nasdaq.com",
-    "annualreports.com",
 ]
 
 _OFFICIAL_COMPANY_DOMAINS = [
     "catl.com",
     "byd.com",
     "ir.tencent.com",
-    "investor.alibaba.com",
     "investor.pddholdings.com",
     "pddholdings.com",
     "tencent.com",
     "meituan.com",
-    "alibabagroup.com",
     "nvidia.com",
     "tesla.com",
     "apple.com",
@@ -52,6 +50,7 @@ _OFFICIAL_COMPANY_DOMAINS = [
 _OFFICIAL_PATH_TOKENS = [
     "/uploads/",
     "/ir/",
+    "/ir-",
     "/investor/",
     "/investors/",
     "/report/",
@@ -61,6 +60,14 @@ _OFFICIAL_PATH_TOKENS = [
     "/financial/",
     "/earnings/",
     "/results/",
+    "/result/",
+    "/document-",
+    "/documents/",
+    "/financial-reports",
+    "/news-filings",
+    "/quarterly-results",
+    "/investor-relations",
+    "/zh-hk/results",
 ]
 
 _OFFICIAL_TITLE_TOKENS = [
@@ -75,6 +82,11 @@ _OFFICIAL_TITLE_TOKENS = [
     "earnings_release",
     "earnings release",
     "financial results",
+    "investor relations",
+    "quarterly results",
+    "results announcement",
+    "form 20-f",
+    "press release",
 ]
 
 _DISCLOSURE_KEYWORD_TOKENS = [
@@ -88,6 +100,16 @@ _DISCLOSURE_KEYWORD_TOKENS = [
     "主要会计数据",
     "营业收入",
     "归属于上市公司股东的净利润",
+    "investor relations",
+    "quarterly results",
+    "annual report",
+    "download pdf",
+    "webcast",
+    "presentation",
+    "transcript",
+    "form 20-f",
+    "revenue",
+    "operating cash flow",
 ]
 
 _TIER2_DOMAINS = [
@@ -113,6 +135,9 @@ _TIER2_DOMAINS = [
     "moodys.com",
     "fitchratings.com",
     "seekingalpha.com",
+    "tradingview.com",
+    "simplywall.st",
+    "annualreports.com",
 ]
 
 _COMMUNITY_DOMAINS = [
@@ -133,6 +158,16 @@ _AGGREGATOR_DOMAINS = [
     "news.qq.com",
     "163.com",
     "ifeng.com",
+]
+
+_PROFESSIONAL_AGGREGATOR_DOMAINS = [
+    "tradingview.com",
+    "simplywall.st",
+    "annualreports.com",
+]
+
+_RESEARCH_REPOSITORY_DOMAINS = [
+    "annualreports.com",
 ]
 
 _FINANCIAL_SIGNAL_TOKENS = [
@@ -220,6 +255,8 @@ _EVIDENCE_SIGNAL_TOKENS = _FINANCIAL_SIGNAL_TOKENS + [
     "可持续",
 ]
 
+_ENTITY_OFFICIAL_DOMAIN_CACHE: dict[str, set[str]] = {}
+
 
 def get_entity_aliases(topic: Topic) -> list[str]:
     entity = topic.entity or topic.topic
@@ -232,6 +269,200 @@ def _domain(url: str | None) -> str:
         return ""
     parsed = urlparse(url)
     return parsed.netloc.lower()
+
+
+def _domain_contains(domain: str, domains: list[str]) -> bool:
+    return any(item in domain for item in domains)
+
+
+def _site_role(domain: str, url_text: str = "", source_type: str = "other") -> str:
+    """Classify the publisher's role before page content is allowed to affect tier."""
+
+    regulatory_tokens = ["sec.gov", "csrc.gov.cn", "sse.com.cn", "szse.cn", "hkexnews.hk", "cninfo.com.cn", "ndrc.gov.cn"]
+    if source_type == "regulatory" or _domain_contains(domain, regulatory_tokens):
+        return "regulatory"
+    if _domain_contains(domain, _RESEARCH_REPOSITORY_DOMAINS):
+        return "research_repository"
+    if _domain_contains(domain, _PROFESSIONAL_AGGREGATOR_DOMAINS):
+        return "professional_aggregator"
+    if _domain_contains(domain, _COMMUNITY_DOMAINS):
+        return "community"
+    if _domain_contains(domain, _SELF_MEDIA_DOMAINS):
+        return "self_media"
+    if _domain_contains(domain, _AGGREGATOR_DOMAINS):
+        return "aggregator"
+    if _domain_contains(domain, _OFFICIAL_COMPANY_DOMAINS):
+        return "issuer"
+    if "ir." in domain or "investor" in domain or "investors" in domain:
+        return "issuer_candidate"
+    if any(token in url_text for token in ["/investor-relations", "/ir/", "/investors/"]):
+        return "issuer_candidate"
+    return "unknown"
+
+
+def _compact_brand(value: str) -> str:
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", value.lower())
+
+
+def _domain_brand_match(entity: str | None, domain: str, title: str = "", content: str = "") -> bool:
+    if not domain:
+        return False
+    domain_compact = _compact_brand(domain.removeprefix("www."))
+    text_compact = _compact_brand(f"{title} {content[:1200]}")
+    domain_tokens = [token for token in re.split(r"[^a-z0-9]+", domain.lower()) if len(token) >= 4]
+    if any(token in text_compact for token in domain_tokens):
+        return True
+    if not entity:
+        return False
+    aliases = _ENTITY_ALIASES.get(entity, [entity])
+    for alias in aliases:
+        alias_compact = _compact_brand(alias)
+        if len(alias_compact) >= 4 and alias_compact in domain_compact:
+            return True
+    entity_compact = _compact_brand(entity)
+    return len(entity_compact) >= 2 and entity_compact in domain_compact
+
+
+def classify_source_origin_v2(
+    entity: str | None,
+    url: str | None,
+    title: str,
+    content: str = "",
+    linked_from: str | None = None,
+    source_type: str = "other",
+) -> dict:
+    """Entity-aware official-source classifier that avoids one-off domain whitelisting."""
+
+    domain = _domain(url)
+    url_text = (url or "").lower()
+    title_text = (title or "").lower()
+    content_text = (content or "")[:3000]
+    lowered_content = content_text.lower()
+    haystack = f"{url_text} {title_text} {lowered_content}"
+    signals: list[str] = []
+    score = 0.0
+    site_role = _site_role(domain, url_text, source_type)
+    signals.append(f"site_role={site_role}")
+
+    if site_role == "research_repository":
+        return {
+            "is_official": False,
+            "is_company_ir": False,
+            "is_regulatory": False,
+            "official_confidence": 0.0,
+            "matched_entity_name": entity if entity and entity.lower() in haystack else None,
+            "signals": signals + ["site_role_cap"],
+            "source_origin_type": "research_media",
+        }
+
+    if site_role == "professional_aggregator":
+        return {
+            "is_official": False,
+            "is_company_ir": False,
+            "is_regulatory": False,
+            "official_confidence": 0.0,
+            "matched_entity_name": entity if entity and entity.lower() in haystack else None,
+            "signals": signals + ["site_role_cap"],
+            "source_origin_type": "professional_media",
+        }
+
+    if site_role in {"community", "self_media", "aggregator"}:
+        return {
+            "is_official": False,
+            "is_company_ir": False,
+            "is_regulatory": False,
+            "official_confidence": 0.0,
+            "matched_entity_name": entity if entity and entity.lower() in haystack else None,
+            "signals": signals + ["site_role_cap"],
+            "source_origin_type": site_role,
+        }
+
+    regulatory_tokens = ["sec.gov", "csrc.gov.cn", "sse.com.cn", "szse.cn", "hkexnews.hk", "cninfo.com.cn", "ndrc.gov.cn"]
+    is_regulatory = site_role == "regulatory" or source_type == "regulatory" or any(token in domain for token in regulatory_tokens)
+    if is_regulatory:
+        score += 0.45
+        signals.append("regulatory_domain")
+
+    cached_domains = _ENTITY_OFFICIAL_DOMAIN_CACHE.get(entity or "", set())
+    if domain in cached_domains:
+        score += 0.28
+        signals.append("entity_cache_domain")
+
+    domain_brand_matched = _domain_brand_match(entity, domain, title, content)
+    if domain_brand_matched:
+        score += 0.32
+        signals.append("domain_brand_match")
+    elif _domain_contains(domain, _OFFICIAL_COMPANY_DOMAINS):
+        score += 0.24
+        signals.append("known_company_domain")
+
+    aliases = _ENTITY_ALIASES.get(entity or "", [entity] if entity else [])
+    title_entity_match = any(alias and alias.lower() in title_text for alias in aliases)
+    body_entity_match = any(alias and alias.lower() in lowered_content for alias in aliases)
+    if title_entity_match:
+        score += 0.14
+        signals.append("title_entity_match")
+    if body_entity_match:
+        score += 0.12
+        signals.append("body_entity_match")
+
+    role_allows_official = site_role in {"issuer", "issuer_candidate", "regulatory"} or (
+        site_role == "unknown" and domain_brand_matched
+    )
+    if source_type in {"report", "company"} and role_allows_official:
+        score += 0.1
+        signals.append("official_source_type")
+
+    ir_keywords = [
+        "investor relations",
+        "quarterly results",
+        "financial reports",
+        "annual report",
+        "press release",
+        "form 20-f",
+        "results",
+        "earnings",
+        "业绩",
+        "财报",
+        "年报",
+        "年度报告",
+    ]
+    if any(token in haystack for token in ir_keywords):
+        score += 0.18
+        signals.append("ir_keyword")
+
+    if any(token in url_text for token in _OFFICIAL_PATH_TOKENS):
+        score += 0.16
+        signals.append("path_pattern")
+
+    structural_tokens = ["download pdf", "webcast", "presentation", "transcript", "revenue", "operating cash flow", "ticker", "stock code"]
+    if sum(1 for token in structural_tokens if token in lowered_content) >= 2:
+        score += 0.14
+        signals.append("ir_page_structure")
+
+    if linked_from and any(token in linked_from.lower() for token in ["hkexnews.hk", "sec.gov", "investor", "ir"]):
+        score += 0.12
+        signals.append("regulatory_backlink")
+
+    if not (is_regulatory or role_allows_official):
+        score = min(score, 0.55)
+        signals.append("site_role_official_cap")
+
+    score = max(0.0, min(1.0, round(score, 3)))
+    is_company_ir = role_allows_official and score >= 0.8 and not is_regulatory
+    is_official = bool(is_regulatory or (role_allows_official and score >= 0.6))
+    source_origin_type = "regulatory" if is_regulatory else "company_ir" if is_company_ir else "official_disclosure" if score >= 0.6 else "unknown"
+    if entity and is_official and domain:
+        _ENTITY_OFFICIAL_DOMAIN_CACHE.setdefault(entity, set()).add(domain)
+    return {
+        "is_official": is_official,
+        "is_company_ir": is_company_ir,
+        "is_regulatory": is_regulatory,
+        "official_confidence": score,
+        "matched_entity_name": entity if title_entity_match or body_entity_match or _domain_brand_match(entity, domain, title, content) else None,
+        "signals": signals,
+        "source_origin_type": source_origin_type,
+    }
 
 
 def assign_credibility_tier(url: str | None) -> str:
@@ -261,18 +492,33 @@ def classify_source_origin(
     title: str,
     source_type: str,
     content: str = "",
+    entity: str | None = None,
 ) -> str:
     """Classify where a source originated, separately from quality score."""
 
     domain = _domain(url)
     text = f"{url or ''} {title} {content[:500]}".lower()
+    site_role = _site_role(domain, (url or "").lower(), source_type)
+    if site_role == "research_repository":
+        return "research_media"
+    if site_role == "professional_aggregator":
+        return "professional_media"
+    if site_role in {"community", "self_media", "aggregator"}:
+        return site_role
+    v2_result = classify_source_origin_v2(entity, url, title, content, source_type=source_type)
+    if v2_result["source_origin_type"] != "unknown":
+        return v2_result["source_origin_type"]
     official_score = score_official_source(url, title, source_type, content)
 
     regulatory_tokens = ["sec.gov", "csrc.gov.cn", "sse.com.cn", "szse.cn", "hkexnews.hk", "cninfo.com.cn", "ndrc.gov.cn"]
     if source_type == "regulatory" or any(token in domain for token in regulatory_tokens):
         return "regulatory"
 
-    if official_score >= 0.58 and any(item in domain for item in _OFFICIAL_COMPANY_DOMAINS):
+    role_allows_official = site_role in {"issuer", "issuer_candidate", "regulatory"} or (
+        site_role == "unknown" and _domain_brand_match(entity, domain, title, content)
+    )
+
+    if official_score >= 0.58 and _domain_contains(domain, _OFFICIAL_COMPANY_DOMAINS):
         return "company_ir"
 
     official_disclosure_tokens = [
@@ -290,25 +536,25 @@ def classify_source_origin(
         "财报",
     ]
     if any(token in text for token in official_disclosure_tokens):
-        if any(item in domain for item in _TIER1_DOMAINS) or "investor" in domain or "ir." in domain:
+        if role_allows_official and (_domain_contains(domain, _TIER1_DOMAINS) or "investor" in domain or "ir." in domain):
             return "official_disclosure"
 
     company_ir_tokens = ["investor", "investors", "ir.", "/ir", "investor-relations", "newsroom", "press-release", "official"]
     if source_type == "company" or any(token in text for token in company_ir_tokens):
-        if not any(item in domain for item in _COMMUNITY_DOMAINS + _SELF_MEDIA_DOMAINS + _AGGREGATOR_DOMAINS):
+        if role_allows_official:
             return "company_ir"
 
-    if any(item in domain for item in _TIER1_DOMAINS):
+    if role_allows_official and _domain_contains(domain, _TIER1_DOMAINS):
         return "official_disclosure"
-    if any(item in domain for item in _TIER2_DOMAINS):
+    if _domain_contains(domain, _TIER2_DOMAINS):
         if any(token in text for token in ["research", "report", "rating", "研报", "评级", "industry report"]):
             return "research_media"
         return "professional_media"
-    if any(item in domain for item in _COMMUNITY_DOMAINS):
+    if _domain_contains(domain, _COMMUNITY_DOMAINS):
         return "community"
-    if any(item in domain for item in _SELF_MEDIA_DOMAINS):
+    if _domain_contains(domain, _SELF_MEDIA_DOMAINS):
         return "self_media"
-    if any(item in domain for item in _AGGREGATOR_DOMAINS):
+    if _domain_contains(domain, _AGGREGATOR_DOMAINS):
         return "aggregator"
     return "unknown"
 
@@ -323,9 +569,12 @@ def score_official_source(url: str | None, title: str, source_type: str, content
     score = 0.0
     if source_type in {"regulatory", "company"}:
         score += 0.2
-    if any(item in domain for item in _OFFICIAL_COMPANY_DOMAINS):
+    site_role = _site_role(domain, url_text, source_type)
+    if site_role in {"professional_aggregator", "research_repository", "community", "self_media", "aggregator"}:
+        return 0.0
+    if _domain_contains(domain, _OFFICIAL_COMPANY_DOMAINS):
         score += 0.35
-    if any(item in domain for item in _TIER1_DOMAINS):
+    if _domain_contains(domain, _TIER1_DOMAINS):
         score += 0.28
     if any(token in url_text for token in _OFFICIAL_PATH_TOKENS):
         score += 0.18
@@ -338,21 +587,22 @@ def score_official_source(url: str | None, title: str, source_type: str, content
     return max(0.0, min(1.0, round(score, 3)))
 
 
-def _source_origin(source: Source) -> str:
+def _source_origin(source: Source, topic: Topic | None = None) -> str:
     if source.source_origin_type != "unknown":
         return source.source_origin_type
-    return classify_source_origin(source.url, source.title, source.source_type, _source_text(source))
+    return classify_source_origin(source.url, source.title, source.source_type, _source_text(source), entity=(topic.entity if topic else None))
 
 
 def _source_tier(source: Source) -> SourceTier:
     return _downgrade_tier_for_content_signals(classify_tier_from_origin(_source_origin(source)), source)
 
 
-def is_official_pdf_source(source: Source) -> bool:
+def is_official_pdf_source(source: Source, topic: Topic | None = None) -> bool:
+    origin = _source_origin(source, topic)
     return bool(
         _is_pdf_like(source)
-        and classify_tier_from_origin(_source_origin(source)) == SourceTier.TIER1
-        and _source_origin(source) in {"company_ir", "official_disclosure", "regulatory"}
+        and classify_tier_from_origin(origin) == SourceTier.TIER1
+        and origin in {"company_ir", "official_disclosure", "regulatory"}
     )
 
 
@@ -473,7 +723,10 @@ def is_gibberish_text(text: str) -> bool:
 def _has_entity_signal(source: Source, topic: Topic) -> bool:
     content = _source_text(source)
     haystack = f"{source.title} {content[:1200]}".lower()
-    return any(alias.lower() in haystack for alias in get_entity_aliases(topic))
+    if any(alias.lower() in haystack for alias in get_entity_aliases(topic)):
+        return True
+    official_result = classify_source_origin_v2(topic.entity, source.url, source.title, content, source_type=source.source_type)
+    return bool(official_result.get("matched_entity_name"))
 
 
 def contains_target_entity(text: str, topic: Topic) -> bool:
@@ -507,7 +760,8 @@ def score_source(source: Source, topic: Topic) -> tuple[float, str]:
     content = _source_text(source)
     quality = text_quality_score(content)
     relevance = _topic_relevance_score(source, topic)
-    tier = _source_tier(source)
+    origin = _source_origin(source, topic)
+    tier = _downgrade_tier_for_content_signals(classify_tier_from_origin(origin), source)
     tier_bonus = {
         SourceTier.TIER1: 0.34,
         SourceTier.TIER2: 0.2,
@@ -572,7 +826,7 @@ def is_usable_source(source: Source, topic: Topic) -> bool:
 def rank_sources(sources: list[Source], topic: Topic, limit: int) -> list[Source]:
     usable: list[Source] = []
     for source in sources:
-        origin = _source_origin(source)
+        origin = _source_origin(source, topic)
         tier = _downgrade_tier_for_content_signals(classify_tier_from_origin(origin), source)
         legacy_tier = {
             SourceTier.TIER1: "tier1",
@@ -591,7 +845,7 @@ def rank_sources(sources: list[Source], topic: Topic, limit: int) -> list[Source
                 "contains_entity": _has_entity_signal(source, topic),
                 "is_recent": compute_is_recent(resolved_date) if resolved_date is not None else is_recent_source(source),
                 "date_source": date_source,
-                "is_official_pdf": is_official_pdf_source(source),
+                "is_official_pdf": is_official_pdf_source(source, topic),
             }
         )
         if is_usable_source(enriched, topic):

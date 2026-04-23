@@ -104,7 +104,20 @@ class ResearchAction(BaseModel):
     query_templates: list[str]
     target_sources: list[str] = Field(default_factory=list)
     source_targets: list[str]
-    status: Literal["pending", "running", "done", "skipped"] = "pending"
+    status: Literal[
+        "pending",
+        "running",
+        "done",
+        "skipped",
+        "skipped_duplicate_query",
+        "skipped_low_expected_yield",
+        "skipped_source_budget_exceeded",
+        "skipped_no_official_target_source",
+        "attempted_no_new_evidence",
+        "attempted_low_quality_only",
+        "attempted_but_not_covering_gap",
+    ] = "pending"
+    status_reason: str | None = None
     question_id: str | None = None
 
 
@@ -187,6 +200,9 @@ class Judgment(BaseModel):
     topic_id: str
     conclusion: str
     conclusion_evidence_ids: list[str]
+    verified_facts: list[str] = Field(default_factory=list)
+    probable_inferences: list[str] = Field(default_factory=list)
+    pending_assumptions: list[str] = Field(default_factory=list)
     clusters: list[EvidenceCluster]
     risk: list[RiskItem]
     bear_theses: list[BearThesis] = Field(default_factory=list)

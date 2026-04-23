@@ -64,6 +64,14 @@ _PEER_BENCHMARK_DIMENSIONS = [
     "Valuation Multiple",
     "Leverage",
 ]
+_PEER_REQUIRED_FIELDS = {
+    "revenue_growth": ["revenue_growth", "营收增速", "收入增速", "Revenue Growth"],
+    "gross_margin": ["gross_margin", "毛利率", "Gross Margin"],
+    "valuation": ["valuation_pe", "valuation_ev_ebitda", "PE", "PB", "EV/EBITDA", "估值"],
+    "market_share": ["market_share", "市场份额", "市占率", "Market Share"],
+    "capex_intensity": ["capex_intensity", "资本开支强度", "Capex Intensity"],
+    "overseas_exposure": ["overseas_exposure", "海外", "Overseas Exposure"],
+}
 
 _METRIC_TOKENS = {
     "盈利能力": ["利润", "净利润", "毛利率", "营收", "收入", "盈利"],
@@ -185,6 +193,56 @@ def _build_trend_signals(evidence: list[Evidence], variables: list[ResearchVaria
     return signals[:5]
 
 
+def _peer_row_dimension_coverage(rows: list[dict]) -> set[str]:
+    covered: set[str] = set()
+    for row in rows:
+        for dimension, keys in _PEER_REQUIRED_FIELDS.items():
+            for key in keys:
+                value = row.get(key)
+                if value is None or value == "":
+                    continue
+                covered.add(dimension)
+                break
+    return covered
+
+
+def _peer_text_dimension_coverage(items: list[Evidence]) -> set[str]:
+    usable_texts = [
+        item.content
+        for item in items
+        if not any(token in item.content for token in ["未披露", "缺少", "没有披露", "未提供", "待补充"])
+    ]
+    text = " ".join(usable_texts)
+    covered: set[str] = set()
+    for dimension, tokens in _PEER_REQUIRED_FIELDS.items():
+        if any(token in text for token in tokens):
+            covered.add(dimension)
+    return covered
+
+
+def _missing_peer_dimensions(covered: set[str]) -> list[str]:
+    labels = {
+        "revenue_growth": "营收增速",
+        "gross_margin": "毛利率",
+        "valuation": "估值倍数",
+        "market_share": "市场份额",
+        "capex_intensity": "资本开支强度",
+        "overseas_exposure": "海外暴露",
+    }
+    return [labels[key] for key in _PEER_REQUIRED_FIELDS if key not in covered]
+
+
+def _peer_context_status(rows: list[dict], peer_evidence: list[Evidence]) -> tuple[str, str]:
+    row_covered = _peer_row_dimension_coverage(rows)
+    text_covered = _peer_text_dimension_coverage(peer_evidence)
+    covered = row_covered | text_covered
+    required_core = {"revenue_growth", "gross_margin", "valuation"}
+    if required_core.issubset(covered) and len(covered) >= 4:
+        return "covered", "同行对比已覆盖营收增速、盈利能力、估值与至少一个竞争/资本维度。"
+    missing = "、".join(_missing_peer_dimensions(covered)[:4])
+    return "needs_research", f"已有同行线索，但缺少可直接比较的核心字段：{missing}。"
+
+
 def _build_peer_context(topic: Topic, evidence: list[Evidence]) -> PeerContext:
     object_type = getattr(topic, "research_object_type", "unknown")
     if object_type in {"macro_theme", "event"}:
@@ -217,13 +275,14 @@ def _build_peer_context(topic: Topic, evidence: list[Evidence]) -> PeerContext:
     ]
 
     if peer_evidence:
+        status, status_note = _peer_context_status(peer_rows, peer_evidence)
         return PeerContext(
             required=True,
-            status="covered",
+            status=status,
             peer_entities=peer_entities,
             evidence_ids=[item.id for item in peer_evidence[:5]],
             comparison_rows=peer_rows,
-            note="已有部分相对比较证据，但仍建议补充更结构化的同业、主题或信用基准。",
+            note=f"{status_note} 仍建议优先补充 professional/official 来源的结构化同业、主题或信用基准。",
         )
 
     if object_type == "private_company":

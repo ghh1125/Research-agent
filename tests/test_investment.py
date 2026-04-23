@@ -116,6 +116,38 @@ class InvestmentLayerTest(unittest.TestCase):
         self.assertTrue(judgment.peer_context.comparison_rows)
         self.assertTrue(any(item.startswith("peer_group=") for item in judgment.investment_decision.decision_basis))
 
+    def test_peer_paragraph_without_core_dimensions_is_not_covered(self) -> None:
+        topic = Topic(
+            id="topic_004",
+            query="研究英伟达估值和竞争",
+            topic="英伟达研究价值",
+            goal="判断相对同行位置",
+            type="company",
+            entity="英伟达",
+            research_object_type="listed_company",
+        )
+        questions = [Question(id="q1", topic_id=topic.id, content="同行对比如何", priority=1, framework_type="industry")]
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="报告提到公司需要与AMD、Intel等同行对比，但未披露营收增速、毛利率、估值、市占率或资本开支强度。",
+                evidence_type="claim",
+                stance="neutral",
+                evidence_score=0.8,
+                quality_score=0.8,
+                source_tier="professional",
+            )
+        ]
+        judgment = reason_and_generate(topic, evidence, questions)
+
+        judgment = apply_investment_layer(topic, questions, evidence, judgment)
+
+        self.assertEqual(judgment.peer_context.status, "needs_research")
+        self.assertIn("缺少", judgment.peer_context.note)
+
 
 if __name__ == "__main__":
     unittest.main()

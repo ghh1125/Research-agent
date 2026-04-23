@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -26,6 +27,7 @@ from app.services.content_fetcher import enrich_sources_content
 from app.services.evidence_engine import rank_sources
 from app.services.financial_data_service import fetch_financial_snapshot
 from app.services.official_source_injector import inject_official_sources
+from app.services.official_document_extractor import official_parse_metrics
 from app.services.pdf_service import enrich_pdf_sources
 from app.services.storage_service import (
     save_evidence,
@@ -39,6 +41,8 @@ from app.services.storage_service import (
 )
 
 ProgressCallback = Callable[[str, str, object | None], None]
+
+logger = logging.getLogger(__name__)
 
 FINANCIAL_SOURCE_STATUSES = {"SUCCESS", "PARTIAL_SUCCESS", "FALLBACK_USED", "ok", "fallback_from_search"}
 
@@ -283,31 +287,103 @@ def _enrich_and_rank_sources(sources: list[Source], topic: Topic) -> list[Source
 def _attach_peer_comparison_to_judgment(judgment, snapshot: FinancialSnapshot):
     if not snapshot.peer_comparison or judgment.peer_context is None:
         return judgment
+    status, status_note = _peer_comparison_status_note(snapshot.peer_comparison)
     peer_context = judgment.peer_context.model_copy(
         update={
             "comparison_rows": snapshot.peer_comparison,
             "peer_entities": snapshot.peer_symbols or judgment.peer_context.peer_entities,
-            "status": "covered",
-            "note": f"{judgment.peer_context.note} 已补充 {snapshot.provider} 同行对比表。",
+            "status": status,
+            "note": f"{judgment.peer_context.note} {status_note} 来源：{snapshot.provider}。",
         }
     )
     return judgment.model_copy(update={"peer_context": peer_context})
 
 
 _RELATIVE_CONTEXT_TOKENS = ["同行", "行业平均", "对比", "竞争对手", "市占率", "市场份额", "相对位置", "peer", "competitor"]
+_PEER_REQUIRED_FIELDS = {
+    "revenue_growth": ["revenue_growth", "Revenue Growth", "营收增速", "收入增速"],
+    "gross_margin": ["gross_margin", "Gross Margin", "毛利率"],
+    "valuation": ["valuation_pe", "valuation_ev_ebitda", "trailingPE", "enterpriseToEbitda", "PE", "EV/EBITDA", "估值倍数"],
+    "market_share": ["market_share", "Market Share", "市场份额", "市占率"],
+    "capex_intensity": ["capex_intensity", "Capex Intensity", "资本开支强度"],
+    "overseas_exposure": ["overseas_exposure", "Overseas Exposure", "海外暴露", "海外收入"],
+}
 
 
 def _effective_evidence_count(evidence: list) -> int:
     return len([item for item in evidence if (item.evidence_score or item.quality_score or 0) >= 0.35])
 
 
-def _has_relative_context(evidence: list, financial_snapshot: FinancialSnapshot | None = None) -> bool:
-    if financial_snapshot is not None and financial_snapshot.peer_comparison:
-        return True
-    return any(
-        any(token.lower() in item.content.lower() for token in _RELATIVE_CONTEXT_TOKENS)
-        for item in evidence
+def _log_official_evidence_metrics(sources: list[Source], evidence: list[Evidence], judgment=None) -> None:
+    metrics = official_parse_metrics(sources, evidence)
+    official_structured_ids = {
+        item.id for item in evidence if "official_structured_financial" in (item.quality_notes or [])
+    }
+    used_ids: set[str] = set()
+    if judgment is not None:
+        used_ids.update(getattr(judgment, "conclusion_evidence_ids", []) or [])
+        for cluster in getattr(judgment, "clusters", []) or []:
+            used_ids.update(getattr(cluster, "support_evidence_ids", []) or [])
+            used_ids.update(getattr(cluster, "counter_evidence_ids", []) or [])
+    metrics["official_evidence_used_in_judgment_rate"] = (
+        round(len(official_structured_ids & used_ids) / len(official_structured_ids), 3)
+        if official_structured_ids
+        else 0.0
     )
+    logger.info("official_document_evidence_metrics", extra=metrics)
+
+
+def _peer_comparison_dimensions(rows: list[dict]) -> set[str]:
+    covered: set[str] = set()
+    for row in rows:
+        for dimension, keys in _PEER_REQUIRED_FIELDS.items():
+            for key in keys:
+                value = row.get(key)
+                if value is None or value == "":
+                    continue
+                covered.add(dimension)
+                break
+    return covered
+
+
+def _peer_comparison_ready(rows: list[dict]) -> bool:
+    covered = _peer_comparison_dimensions(rows)
+    return {"revenue_growth", "gross_margin", "valuation"}.issubset(covered) and len(covered) >= 4
+
+
+def _peer_evidence_dimensions(evidence: list) -> set[str]:
+    text = " ".join(item.content for item in evidence if (item.evidence_score or item.quality_score or 0) >= 0.35)
+    covered: set[str] = set()
+    for dimension, tokens in _PEER_REQUIRED_FIELDS.items():
+        if any(token.lower() in text.lower() for token in tokens):
+            covered.add(dimension)
+    return covered
+
+
+def _peer_evidence_ready(evidence: list) -> bool:
+    covered = _peer_evidence_dimensions(evidence)
+    return {"revenue_growth", "gross_margin", "valuation"}.issubset(covered) and len(covered) >= 4
+
+
+def _peer_comparison_status_note(rows: list[dict]) -> tuple[str, str]:
+    if _peer_comparison_ready(rows):
+        return "covered", "已补充结构化同行对比表，覆盖营收增速、毛利率、估值及至少一个竞争/资本维度。"
+    labels = {
+        "revenue_growth": "营收增速",
+        "gross_margin": "毛利率",
+        "valuation": "估值倍数",
+        "market_share": "市场份额",
+        "capex_intensity": "资本开支强度",
+        "overseas_exposure": "海外暴露",
+    }
+    missing = [labels[key] for key in _PEER_REQUIRED_FIELDS if key not in _peer_comparison_dimensions(rows)]
+    return "needs_research", f"已获取同行表，但缺少核心对比字段：{'、'.join(missing[:4])}。"
+
+
+def _has_relative_context(evidence: list, financial_snapshot: FinancialSnapshot | None = None) -> bool:
+    if financial_snapshot is not None and _peer_comparison_ready(financial_snapshot.peer_comparison or []):
+        return True
+    return _peer_evidence_ready(evidence)
 
 
 def _mark_question_coverage(
@@ -321,8 +397,17 @@ def _mark_question_coverage(
         topic is not None
         and getattr(topic, "research_object_type", "unknown") == "listed_company"
     )
+    requires_structured_official_gate = requires_relative_context
     evidence_by_question = {
-        question.id: [item for item in evidence if item.question_id == question.id]
+        question.id: [
+            item
+            for item in evidence
+            if item.question_id == question.id
+            and item.can_enter_main_chain
+            and not item.is_truncated
+            and not item.cross_entity_contamination
+            and not item.is_noise
+        ]
         for question in questions
     }
 
@@ -330,6 +415,17 @@ def _mark_question_coverage(
         if not any(token in text for token in tokens):
             return False
         return bool(re.search(r"\d[\d,]*(?:\.\d+)?\s*(?:亿元|万元|百万|千元|美元|人民币|港元|%|百分点|倍)", text))
+
+    def _has_official_or_professional_structured_evidence(items: list) -> bool:
+        for item in items:
+            source_tier = getattr(item, "source_tier", None)
+            metric_name = getattr(item, "metric_name", None)
+            notes = getattr(item, "quality_notes", []) or []
+            if source_tier in {"official", "professional"} and (
+                metric_name or "official_structured_financial" in notes or "structured_financial_snapshot" in notes
+            ):
+                return True
+        return False
 
     def _coverage_level(question, items: list) -> str:
         if not items:
@@ -339,28 +435,42 @@ def _mark_question_coverage(
             return "uncovered"
         joined = " ".join(texts)
         framework = getattr(question, "framework_type", "general")
+        has_structured_source = _has_official_or_professional_structured_evidence(items)
         if framework == "financial":
             has_revenue = _has_complete_number(joined, ["营业收入", "营收", "收入"])
             has_profit = _has_complete_number(joined, ["净利润", "归母净利润", "扣非净利润"])
             has_margin = _has_complete_number(joined, ["毛利率", "净利率"])
             has_trend = any(token in joined for token in ["同比", "三年", "趋势", "上年同期", "较上年"])
             strong = has_revenue and has_profit and has_margin and has_trend
+            if strong and requires_structured_official_gate and not has_structured_source:
+                return "partial"
             return "covered" if strong else "partial"
         if framework == "credit":
             has_cashflow = _has_complete_number(joined, ["经营现金流", "经营活动现金流", "经营活动产生的现金流量净额"])
             has_capex = _has_complete_number(joined, ["资本开支", "CAPEX", "购建固定资产"])
             has_debt = any(_has_complete_number(joined, [token]) for token in ["有息负债", "债务结构", "短债", "资产负债率", "流动比率"])
             strong = has_cashflow and has_capex and has_debt
+            if strong and requires_structured_official_gate and not has_structured_source:
+                return "partial"
             return "covered" if strong else "partial"
         if framework == "industry":
             has_share = any(token in joined for token in ["市场份额", "市占率", "份额"])
-            has_peer = relative_context_ready or any(token in joined for token in ["同行对比", "同业对比", "同行排名", "竞争对手"])
+            has_peer = relative_context_ready
             has_competition = any(token in joined for token in ["竞争格局", "价格竞争", "客户结构", "技术路线", "产能份额"])
             strong = has_share and has_peer and has_competition
             return "covered" if strong else "partial"
         if framework == "valuation":
             has_multiple = any(token in joined for token in ["PE", "PB", "EV/EBITDA", "EVEBITDA", "市盈率", "市净率", "估值倍数"])
-            return "covered" if has_multiple and relative_context_ready else "uncovered"
+            if has_multiple and relative_context_ready:
+                return "covered" if (has_structured_source or not requires_structured_official_gate) else "partial"
+            return "uncovered"
+        if framework == "moat":
+            moat_tokens = ["留存", "retention", "MAU", "DAU", "月活", "日活", "商户", "merchant", "take rate", "货币化率", "复购", "switching cost"]
+            has_moat_signal = any(token in joined for token in moat_tokens)
+            has_number = bool(re.search(r"\d[\d,]*(?:\.\d+)?\s*(?:亿|万|%|百分点|pct|个|户|次|倍)?", joined, flags=re.I))
+            if has_moat_signal and has_number:
+                return "covered" if (has_structured_source or not requires_structured_official_gate) else "partial"
+            return "uncovered"
         return "covered"
 
     marked = []
@@ -445,11 +555,13 @@ def research_pipeline(
         }
     evidence = extract_evidence(topic, questions, sources)
     evidence = [*evidence, *_snapshot_to_evidence(financial_snapshot, topic, questions, sources, evidence)]
+    _log_official_evidence_metrics(sources, evidence)
     _emit_progress(progress_callback, "extract", f"已提取 {len(evidence)} 条证据。", evidence)
     variables = normalize_variables(evidence)
     _emit_progress(progress_callback, "variable", f"已形成 {len(variables)} 个关键变量。", variables)
     questions = _mark_question_coverage(questions, evidence, topic, financial_snapshot)
     judgment = reason_and_generate(topic, evidence, questions, variables)
+    _log_official_evidence_metrics(sources, evidence, judgment)
     _emit_progress(progress_callback, "reason", f"初步判断：{judgment.conclusion}", judgment)
     actions = generate_research_actions(judgment)
     judgment = judgment.model_copy(update={"research_actions": actions})
@@ -463,6 +575,7 @@ def research_pipeline(
     judgment = auto_result.judgment.model_copy(update={"research_actions": auto_result.actions})
     judgment = apply_investment_layer(topic, questions, evidence, judgment, variables)
     judgment = _attach_peer_comparison_to_judgment(judgment, financial_snapshot)
+    _log_official_evidence_metrics(sources, evidence, judgment)
     _emit_progress(progress_callback, "investment", "已生成研究流程层面的处理建议。", judgment.investment_decision)
     insufficient_after_auto_research = _effective_evidence_count(evidence) < 3
     early_stop_reason = (

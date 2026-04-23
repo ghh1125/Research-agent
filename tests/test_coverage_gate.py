@@ -79,6 +79,122 @@ class CoverageGateTest(unittest.TestCase):
         self.assertEqual(questions[0].coverage_level, "uncovered")
         self.assertFalse(questions[0].covered)
 
+    def test_sparse_peer_snapshot_does_not_make_valuation_covered(self) -> None:
+        topic = Topic(
+            id="t3",
+            query="研究公司估值",
+            topic="公司估值",
+            goal="初筛",
+            type="company",
+            research_object_type="listed_company",
+        )
+        question = Question(id="q1", topic_id=topic.id, content="估值是否合理", priority=1, framework_type="valuation")
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="公司PE为18倍。",
+                evidence_type="data",
+                evidence_score=0.8,
+                quality_score=0.8,
+                source_tier="professional",
+                metric_name="pe_ttm",
+                metric_value=18,
+            )
+        ]
+        snapshot = FinancialSnapshot(
+            entity="公司",
+            provider="test",
+            status="SUCCESS",
+            peer_comparison=[
+                {"ticker": "AAA", "marketCap": 100},
+                {"ticker": "BBB", "marketCap": 80},
+            ],
+        )
+
+        questions = _mark_question_coverage([question], evidence, topic, snapshot)
+
+        self.assertEqual(questions[0].coverage_level, "uncovered")
+        self.assertFalse(questions[0].covered)
+
+    def test_industry_peer_mentions_without_core_dimensions_stay_partial(self) -> None:
+        topic = Topic(
+            id="t4",
+            query="研究公司行业竞争",
+            topic="公司行业竞争",
+            goal="初筛",
+            type="company",
+            research_object_type="listed_company",
+        )
+        question = Question(id="q1", topic_id=topic.id, content="行业竞争如何", priority=1, framework_type="industry")
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="公司市场份额领先，竞争格局稳定，报告提到需要进行同行对比。",
+                evidence_type="claim",
+                evidence_score=0.8,
+                quality_score=0.8,
+                source_tier="professional",
+            )
+        ]
+
+        questions = _mark_question_coverage([question], evidence, topic)
+
+        self.assertEqual(questions[0].coverage_level, "partial")
+        self.assertFalse(questions[0].covered)
+
+    def test_moat_requires_retention_share_user_or_merchant_evidence(self) -> None:
+        topic = Topic(
+            id="t5",
+            query="研究公司护城河",
+            topic="公司护城河",
+            goal="初筛",
+            type="company",
+            research_object_type="listed_company",
+        )
+        question = Question(id="q1", topic_id=topic.id, content="护城河是否成立", priority=1, framework_type="moat")
+        weak = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="公司生态强、护城河深，长期竞争优势明显。",
+                evidence_type="claim",
+                evidence_score=0.8,
+                quality_score=0.8,
+                source_tier="professional",
+            )
+        ]
+        strong = [
+            Evidence(
+                id="e2",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="公司月活用户MAU达到9亿，商户数量同比增长12%，take rate提升至4.2%。",
+                evidence_type="data",
+                evidence_score=0.8,
+                quality_score=0.8,
+                source_tier="professional",
+                metric_name="merchant_count",
+                metric_value=9,
+            )
+        ]
+
+        weak_questions = _mark_question_coverage([question], weak, topic)
+        strong_questions = _mark_question_coverage([question], strong, topic)
+
+        self.assertEqual(weak_questions[0].coverage_level, "uncovered")
+        self.assertFalse(weak_questions[0].covered)
+        self.assertEqual(strong_questions[0].coverage_level, "covered")
+        self.assertTrue(strong_questions[0].covered)
+
 
 if __name__ == "__main__":
     unittest.main()

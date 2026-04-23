@@ -23,6 +23,18 @@ from app.models.variable import ResearchVariable
 from app.services.llm_service import call_llm
 
 _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+_STRONG_JUDGMENT_TOKENS = [
+    "已企稳",
+    "FCF企稳",
+    "形成壁垒",
+    "护城河已成立",
+    "估值具吸引力",
+    "现金流改善确定",
+    "费用率见顶",
+    "长期ROI确定",
+    "具备明确投资价值",
+    "明确投资价值",
+]
 
 
 def _collect_theme_hits(evidence: list[Evidence]) -> Counter[str]:
@@ -43,7 +55,15 @@ def _collect_theme_hits(evidence: list[Evidence]) -> Counter[str]:
 
 
 def _validate_evidence_ids(referenced_ids: list[str], evidence_map: dict[str, Evidence]) -> list[str]:
-    valid_ids = [evidence_id for evidence_id in referenced_ids if evidence_id in evidence_map]
+    valid_ids = [
+        evidence_id
+        for evidence_id in referenced_ids
+        if evidence_id in evidence_map
+        and evidence_map[evidence_id].can_enter_main_chain
+        and not evidence_map[evidence_id].is_truncated
+        and not evidence_map[evidence_id].cross_entity_contamination
+        and not evidence_map[evidence_id].is_noise
+    ]
     seen: set[str] = set()
     deduped: list[str] = []
     for evidence_id in valid_ids:
@@ -654,6 +674,94 @@ def _build_bear_theses(
     return theses[:3]
 
 
+def _period_scope_notes(evidence: list[Evidence]) -> list[str]:
+    grouped: dict[tuple[str, str, str], set[str]] = {}
+    for item in evidence:
+        if not item.metric_name or not item.period:
+            continue
+        key = (
+            item.metric_name.strip().lower(),
+            (item.segment or "group").strip().lower(),
+            (item.comparison_type or "reported").strip().lower(),
+        )
+        grouped.setdefault(key, set()).add(str(item.period).strip())
+
+    notes: list[str] = []
+    for (metric_name, segment, comparison_type), periods in grouped.items():
+        if len(periods) <= 1:
+            continue
+        ordered_periods = ", ".join(sorted(periods))
+        notes.append(
+            f"同一指标 {metric_name}（scope={segment}, basis={comparison_type}）存在不同期间数据：{ordered_periods}；"
+            "不能直接判定为趋势冲突，需先做期间/口径归一。"
+        )
+    return notes[:3]
+
+
+def _is_high_quality_conclusion_evidence(item: Evidence) -> bool:
+    return (
+        item.source_tier in {"official", "professional"}
+        and item.evidence_type == "data"
+        and not item.is_noise
+        and not item.is_truncated
+        and (item.evidence_score or item.quality_score or 0) >= 0.35
+    )
+
+
+def _build_verified_facts(conclusion_ids: list[str], evidence_map: dict[str, Evidence]) -> list[str]:
+    facts: list[str] = []
+    for evidence_id in conclusion_ids:
+        item = evidence_map.get(evidence_id)
+        if item is None or not _is_high_quality_conclusion_evidence(item):
+            continue
+        label = item.metric_name or "evidence"
+        period = f"（{item.period}）" if item.period else ""
+        facts.append(f"{label}{period}: {item.content}")
+        if len(facts) >= 5:
+            break
+    return facts
+
+
+def _has_uncovered_core_question(evidence_gaps: list[EvidenceGap]) -> bool:
+    return any(gap.importance in {"high", "medium"} for gap in evidence_gaps)
+
+
+def _sanitize_strong_conclusion(conclusion: str, evidence_gaps: list[EvidenceGap]) -> tuple[str, list[str]]:
+    if not _has_uncovered_core_question(evidence_gaps):
+        return conclusion, []
+    matched = [token for token in _STRONG_JUDGMENT_TOKENS if token in conclusion]
+    if not matched:
+        return conclusion, []
+    pending = [
+        "强判断已降级："
+        + "、".join(dict.fromkeys(matched))
+        + " 只能进入待验证前提，不能进入一句话主结论。"
+    ]
+    downgraded = "当前证据只能支持初筛观察；估值、现金流拐点、费用率和长期壁垒等仍属于待验证前提。"
+    return downgraded, pending
+
+
+def _build_judgment_layers(
+    conclusion: str,
+    conclusion_ids: list[str],
+    evidence_map: dict[str, Evidence],
+    evidence_gaps: list[EvidenceGap],
+) -> tuple[str, list[str], list[str], list[str]]:
+    conclusion, downgrade_notes = _sanitize_strong_conclusion(conclusion, evidence_gaps)
+    verified_facts = _build_verified_facts(conclusion_ids, evidence_map)
+    pending_assumptions = downgrade_notes + _period_scope_notes(list(evidence_map.values()))
+    pending_assumptions.extend(gap.text for gap in evidence_gaps[:3])
+    probable_inferences = []
+    if conclusion_ids and not downgrade_notes:
+        probable_inferences.append(conclusion)
+    return (
+        conclusion,
+        verified_facts[:5],
+        probable_inferences[:3],
+        list(dict.fromkeys(pending_assumptions))[:6],
+    )
+
+
 def _build_catalysts(topic: Topic, evidence: list[Evidence], evidence_map: dict[str, Evidence]) -> list[Catalyst]:
     object_type = getattr(topic, "research_object_type", "unknown")
     candidates: list[Catalyst] = []
@@ -809,11 +917,20 @@ def _validate_judgment(
     bear_theses = _build_bear_theses(topic, judgment, evidence_map, pressure_tests)
     catalysts = _build_catalysts(topic, list(evidence_map.values()), evidence_map)
     positioning = _build_positioning(topic, confidence, confidence_basis, pressure_tests)
+    conclusion, verified_facts, probable_inferences, pending_assumptions = _build_judgment_layers(
+        conclusion,
+        conclusion_ids,
+        evidence_map,
+        judgment.evidence_gaps,
+    )
 
     return judgment.model_copy(
         update={
             "conclusion": conclusion,
             "conclusion_evidence_ids": conclusion_ids,
+            "verified_facts": verified_facts,
+            "probable_inferences": probable_inferences,
+            "pending_assumptions": pending_assumptions,
             "clusters": clusters,
             "risk": risk,
             "pressure_tests": pressure_tests,

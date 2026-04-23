@@ -158,6 +158,8 @@ class AutoResearchLoopTest(unittest.TestCase):
         self.assertTrue(result.trace[0].triggered)
         self.assertIn("未检索到新增可用来源", result.trace[0].stop_reason)
         self.assertEqual(result.evidence, [])
+        self.assertEqual(result.actions[0].status, "skipped_no_official_target_source")
+        self.assertIn("官方目标源", result.actions[0].status_reason or "")
 
     def test_loop_marks_ineffective_when_new_evidence_misses_target_gap(self) -> None:
         topic = Topic(
@@ -237,6 +239,80 @@ class AutoResearchLoopTest(unittest.TestCase):
 
         self.assertEqual(result.trace[0].effectiveness_status, "ineffective")
         self.assertEqual(result.trace[0].covered_gap_question_ids, [])
+        self.assertEqual(result.actions[0].status, "attempted_but_not_covering_gap")
+        self.assertIn("未覆盖目标证据缺口", result.actions[0].status_reason or "")
+
+    def test_loop_marks_low_quality_only_when_sources_extract_no_evidence(self) -> None:
+        topic = Topic(
+            id="topic_001",
+            query="研究公司",
+            topic="公司研究",
+            goal="判断研究价值",
+            type="company",
+            entity="测试公司",
+        )
+        questions = [Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1)]
+        basis = ConfidenceBasis(
+            source_count=0,
+            source_diversity="low",
+            conflict_level="none",
+            evidence_gap_level="high",
+            effective_evidence_count=0,
+            has_official_source=False,
+            official_evidence_count=0,
+            weak_source_only=True,
+        )
+        judgment = Judgment(
+            topic_id=topic.id,
+            conclusion="当前证据不足以支撑明确结论",
+            conclusion_evidence_ids=[],
+            clusters=[],
+            risk=[],
+            unknown=["缺少证据"],
+            evidence_gaps=[],
+            confidence="low",
+            confidence_basis=basis,
+            research_actions=[],
+        )
+        actions = [
+            ResearchAction(
+                id="a1",
+                priority="high",
+                objective="补齐财务质量",
+                reason="缺少证据",
+                required_data=["财报"],
+                query_templates=["{entity} 财报"],
+                source_targets=["professional finance media"],
+            )
+        ]
+
+        def low_quality_retrieve(topic, questions, action, existing_sources, start_index):
+            return [
+                Source(
+                    id=f"s{start_index}",
+                    question_id="q1",
+                    title="测试公司导航页",
+                    url="https://example.com/nav",
+                    source_type="website",
+                    provider="fixture",
+                    content="登录 注册 菜单 首页 联系电话 公司网址",
+                )
+            ], ["测试公司 财报"]
+
+        result = auto_research_loop(
+            topic,
+            questions,
+            [],
+            [],
+            [],
+            judgment,
+            actions,
+            max_rounds=1,
+            retrieve_fn=low_quality_retrieve,
+        )
+
+        self.assertEqual(result.actions[0].status, "attempted_low_quality_only")
+        self.assertIn("低质量证据", result.actions[0].status_reason or "")
 
 
 if __name__ == "__main__":

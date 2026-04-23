@@ -160,6 +160,7 @@ def _source_from_result(
         title=result["title"],
         source_type=result["source_type"],
         content=result["content"],
+        entity=topic.entity if topic else None,
     )
     tier = classify_tier_from_origin(origin)
     draft_source = Source(

@@ -14,6 +14,7 @@ from app.services.evidence_engine import (
     relevance_score_for_text,
     score_evidence_text,
 )
+from app.services.official_document_extractor import extract_official_financial_evidence, is_official_financial_source
 
 _CONTRAST_TOKENS = ["但是", "但", "然而", "不过", "却", "尽管", "虽然"]
 _RISK_STANCE_TOKENS = [
@@ -511,6 +512,15 @@ def extract_evidence(
     seen_content_by_source: set[tuple[str, str]] = set()
 
     for source_index, source in enumerate(sources):
+        if is_official_financial_source(source):
+            official_items = extract_official_financial_evidence(source, topic, questions, start_index=len(candidates) + 1)
+            if official_items:
+                candidates.extend(
+                    item.model_copy(update={"id": "pending"})
+                    for item in official_items
+                    if item.can_enter_main_chain and not item.is_truncated and not item.cross_entity_contamination
+                )
+                continue
         sentences = _split_sentences(_source_content_for_extract(source))
         for sentence in sentences:
             for clause in _split_clauses(sentence):
@@ -582,7 +592,11 @@ def extract_evidence(
             item.source_id,
         )
     )
-    primary_candidates = [item for item in candidates if not item.is_truncated]
+    primary_candidates = [
+        item
+        for item in candidates
+        if item.can_enter_main_chain and not item.is_truncated and not item.cross_entity_contamination
+    ]
     overflow_candidates = [item for item in candidates if item.is_truncated]
     selected_candidates = (primary_candidates + overflow_candidates)[:12]
     evidence_list = [item.model_copy(update={"id": f"e{index}"}) for index, item in enumerate(selected_candidates, start=1)]

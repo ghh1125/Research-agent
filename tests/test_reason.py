@@ -266,6 +266,110 @@ class ReasonStepTest(unittest.TestCase):
         self.assertEqual(test.severity, "medium")
         self.assertIn("估值", test.weakness)
 
+    def test_partial_coverage_downgrades_strong_judgment_claims(self) -> None:
+        topic = Topic(
+            id="topic_006",
+            query="研究某上市公司是否值得深研",
+            topic="某上市公司研究价值",
+            goal="判断是否值得深研",
+            type="company",
+            entity="某上市公司",
+            research_object_type="listed_company",
+        )
+        questions = [
+            Question(
+                id="q1",
+                topic_id=topic.id,
+                content="估值是否具备吸引力",
+                priority=1,
+                framework_type="valuation",
+                covered=False,
+                coverage_level="partial",
+            )
+        ]
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                source_tier="official",
+                evidence_score=0.9,
+                quality_score=0.9,
+                content="营业收入同比增长12%至2,600亿元。",
+                evidence_type="data",
+                stance="neutral",
+                metric_name="revenue",
+                metric_value=2600,
+                period="FY2025",
+            )
+        ]
+
+        with patch(
+            "app.agent.steps.reason.call_llm",
+            return_value=(
+                '{"conclusion": "公司FCF企稳、估值具吸引力且护城河已成立。", '
+                '"conclusion_evidence_ids": ["e1"], "clusters": [], "risk": [], '
+                '"unknown": [], "confidence": "high"}'
+            ),
+        ):
+            judgment = reason_and_generate(topic, evidence, questions)
+
+        self.assertNotIn("估值具吸引力", judgment.conclusion)
+        self.assertNotIn("护城河已成立", judgment.conclusion)
+        self.assertNotIn("FCF企稳", judgment.conclusion)
+        self.assertTrue(judgment.pending_assumptions)
+        self.assertIn("待验证", judgment.conclusion)
+
+    def test_period_mismatch_is_treated_as_scope_issue_not_direct_conflict(self) -> None:
+        topic = Topic(
+            id="topic_007",
+            query="研究公司CMR趋势",
+            topic="公司CMR趋势",
+            goal="判断CMR变化",
+            type="company",
+            entity="某上市公司",
+            research_object_type="listed_company",
+        )
+        questions = [Question(id="q1", topic_id=topic.id, content="CMR趋势如何", priority=1, framework_type="financial")]
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                source_tier="official",
+                evidence_score=0.9,
+                content="CMR同比增长1%。",
+                evidence_type="data",
+                metric_name="customer_management_revenue",
+                metric_value=1,
+                unit="%",
+                period="2025Q4",
+                comparison_type="yoy",
+            ),
+            Evidence(
+                id="e2",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                source_tier="official",
+                evidence_score=0.9,
+                content="CMR同比增长10%。",
+                evidence_type="data",
+                metric_name="customer_management_revenue",
+                metric_value=10,
+                unit="%",
+                period="2026Q1",
+                comparison_type="yoy",
+            ),
+        ]
+
+        judgment = reason_and_generate(topic, evidence, questions)
+
+        self.assertTrue(any("不同期间" in item for item in judgment.pending_assumptions + judgment.unknown))
+        self.assertNotEqual(judgment.confidence_basis.conflict_level, "strong")
+
 
 if __name__ == "__main__":
     unittest.main()

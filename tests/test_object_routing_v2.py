@@ -326,6 +326,36 @@ def test_relative_context_affects_coverage_and_confidence_cap() -> None:
             peer_comparison=[{"symbol": "NVDA"}, {"symbol": "AMD"}],
         ),
     )
+    assert strict_questions[0].covered is False
+    assert strict_questions[0].coverage_level == "partial"
+
+    rich_peer_questions = _mark_question_coverage(
+        questions,
+        strict_industry_evidence,
+        topic,
+        FinancialSnapshot(
+            entity="英伟达",
+            provider="yfinance",
+            status="SUCCESS",
+            peer_comparison=[
+                {
+                    "symbol": "NVDA",
+                    "revenue_growth": 1.2,
+                    "gross_margin": 0.73,
+                    "valuation_pe": 45.0,
+                    "market_share": "AI accelerator leader",
+                },
+                {
+                    "symbol": "AMD",
+                    "revenue_growth": 0.2,
+                    "gross_margin": 0.5,
+                    "valuation_pe": 30.0,
+                    "market_share": "GPU challenger",
+                },
+            ],
+        ),
+    )
+    strict_questions = rich_peer_questions
     assert strict_questions[0].covered is True
 
     judgment = Judgment(

@@ -108,6 +108,162 @@ class VariableStepTest(unittest.TestCase):
 
         self.assertFalse(any(item.category == "financial" for item in variables))
 
+    def test_cash_flow_quality_requires_cash_flow_metric_whitelist(self) -> None:
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                content=(
+                    "电话会摘要显示管理层认为业务经营改善，平台生态保持增长，"
+                    "公司将继续投入云业务并提升经营效率，现金流质量有望优化。"
+                ),
+                evidence_type="claim",
+                stance="neutral",
+                evidence_score=0.9,
+                quality_score=0.9,
+            ),
+            Evidence(
+                id="e2",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                content="营业收入同比增长12%至2,600亿元，管理层称现金流质量有望继续改善。",
+                evidence_type="data",
+                stance="neutral",
+                evidence_score=0.9,
+                quality_score=0.9,
+                metric_name="revenue",
+                metric_value=2600,
+                unit="亿元",
+                period="FY2025",
+                comparison_type="yoy",
+            ),
+        ]
+
+        variables = normalize_variables(evidence)
+
+        self.assertFalse(any(item.name == "现金流质量" for item in variables))
+        self.assertIn("收入增长", {item.name for item in variables})
+
+    def test_valuation_anchor_requires_valuation_metric(self) -> None:
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                content="公司收入同比增长12%至2,600亿元，毛利率提升至38%，市场讨论PE估值修复。",
+                evidence_type="data",
+                stance="neutral",
+                evidence_score=0.9,
+                quality_score=0.9,
+                metric_name="revenue",
+                metric_value=2600,
+                unit="亿元",
+                period="FY2025",
+                comparison_type="yoy",
+            )
+        ]
+
+        variables = normalize_variables(evidence)
+
+        self.assertFalse(any(item.name == "估值锚点" for item in variables))
+
+    def test_long_summary_cannot_drive_more_than_two_variables(self) -> None:
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                content=(
+                    "公司营业收入同比增长12%至2,600亿元，毛利率提升至38%，经营现金流改善，资本开支下降，"
+                    "市场份额提升至25%，客户结构优化，PE估值修复至18倍，ROE改善至15%，管理层表示长期竞争力增强。"
+                    "该段为电话会和新闻摘要合并内容，不是单一字段或完整表格行。"
+                ),
+                evidence_type="data",
+                stance="neutral",
+                evidence_score=0.95,
+                quality_score=0.95,
+            )
+        ]
+
+        variables = normalize_variables(evidence)
+        usage_count = sum("e1" in item.evidence_ids for item in variables)
+
+        self.assertLessEqual(usage_count, 2)
+
+    def test_structured_metric_routes_to_matching_variable_only(self) -> None:
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                content="经营活动现金流净额同比增长15%至120亿元。",
+                evidence_type="data",
+                stance="neutral",
+                evidence_score=0.9,
+                quality_score=0.9,
+                metric_name="operating_cash_flow",
+                metric_value=120,
+                unit="亿元",
+                period="FY2025",
+                comparison_type="yoy",
+            )
+        ]
+
+        variables = normalize_variables(evidence)
+        names = {item.name for item in variables}
+
+        self.assertIn("现金流质量", names)
+        self.assertNotIn("收入增长", names)
+        self.assertNotIn("盈利能力", names)
+
+    def test_long_mixed_data_summary_cannot_drive_strict_variables_without_metric_name(self) -> None:
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                content=(
+                    "电话会摘要称公司营业收入同比增长12%至2,600亿元，毛利率提升至38%，"
+                    "经营现金流改善至120亿元，自由现金流改善，资本开支下降，云业务、广告业务、"
+                    "本地生活和国际业务均有增长动能，同时管理层强调长期目标和风险控制。"
+                ),
+                evidence_type="data",
+                stance="neutral",
+                evidence_score=0.95,
+                quality_score=0.95,
+            )
+        ]
+
+        variables = normalize_variables(evidence)
+
+        self.assertFalse(any(item.name in {"收入增长", "盈利能力", "现金流质量", "估值锚点"} for item in variables))
+
+    def test_short_single_metric_sentence_can_drive_strict_variable(self) -> None:
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id="topic_001",
+                question_id="q1",
+                source_id="s1",
+                content="自由现金流同比下降56%至152亿元。",
+                evidence_type="data",
+                stance="neutral",
+                evidence_score=0.9,
+                quality_score=0.9,
+            )
+        ]
+
+        variables = normalize_variables(evidence)
+
+        self.assertIn("现金流质量", {item.name for item in variables})
+
     def test_governance_penalty_forces_deteriorating_direction(self) -> None:
         evidence = [
             Evidence(

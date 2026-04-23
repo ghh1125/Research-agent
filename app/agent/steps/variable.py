@@ -12,9 +12,131 @@ _VARIABLE_SPECS: list[tuple[str, str, list[str], bool]] = [
     ("现金流质量", "financial", ["经营现金流", "经营活动现金流", "自由现金流", "资本开支", "CAPEX", "现金转换率"], True),
     ("负债压力", "financial", ["资产负债率", "有息负债", "债务结构", "短债", "流动比率", "速动比率"], True),
     ("行业竞争", "industry", ["市场份额", "市占率", "客户结构", "ASP", "同行排名", "产能份额", "技术份额", "同行对比"], True),
+    ("护城河", "industry", ["retention", "留存率", "MAU", "DAU", "merchant", "商户", "take rate", "货币化率", "merchant density", "商户密度", "ecosystem lock-in", "生态锁定", "switching cost", "转换成本", "repeat purchase", "复购"], True),
     ("治理合规", "governance", ["治理", "内控", "关联交易", "合规", "监管", "许可", "处罚"], False),
     ("经营韧性", "operation", ["订单", "客户", "分业务", "供应链", "产能利用率", "研发投入"], False),
     ("估值锚点", "valuation", ["PE", "PB", "EV/EBITDA", "EVEBITDA", "市盈率", "市净率", "估值倍数"], True),
+]
+
+_VARIABLE_METRIC_WHITELIST: dict[str, set[str]] = {
+    "收入增长": {
+        "revenue",
+        "revenue_yoy",
+        "gmv",
+        "gmv_signal",
+        "customer_management_revenue",
+        "cmr",
+        "order_growth",
+        "segment_revenue",
+        "business_revenue",
+        "regional_revenue",
+        "cloud_revenue",
+        "aidc_revenue",
+        "local_services_revenue",
+        "cainiao_revenue",
+    },
+    "盈利能力": {
+        "gross_margin",
+        "gross_profit",
+        "net_margin",
+        "net_income",
+        "non_gaap_net_income",
+        "adjusted_ebita",
+        "adjusted_ebita_margin",
+        "ebit_margin",
+        "ebita_margin",
+        "operating_margin",
+        "operating_income",
+        "roe",
+        "roic",
+        "diluted_eps",
+    },
+    "现金流质量": {
+        "operating_cash_flow",
+        "ocf",
+        "free_cash_flow",
+        "fcf",
+        "capital_expenditure",
+        "capex",
+        "cash_conversion_rate",
+        "ocf_net_income",
+        "fcf_coverage",
+    },
+    "负债压力": {
+        "debt_to_asset_ratio",
+        "asset_liability_ratio",
+        "interest_bearing_debt",
+        "debt_structure",
+        "short_term_debt",
+        "current_ratio",
+        "quick_ratio",
+        "cash_balance",
+        "net_debt",
+    },
+    "行业竞争": {
+        "market_share",
+        "peer_comparison",
+        "customer_structure",
+        "asp",
+        "peer_rank",
+        "capacity_share",
+        "technology_share",
+        "segment_position",
+        "capex_intensity",
+        "overseas_exposure",
+    },
+    "护城河": {
+        "retention",
+        "retention_rate",
+        "merchant_density",
+        "mau",
+        "dau",
+        "merchant_count",
+        "take_rate",
+        "ecosystem_lock_in",
+        "switching_cost",
+        "repeat_purchase",
+        "repeat_purchase_rate",
+        "customer_retention",
+    },
+    "估值锚点": {
+        "pe",
+        "pe_ttm",
+        "pb",
+        "ev_ebitda",
+        "ev/ebitda",
+        "fcf_yield",
+        "historical_percentile",
+        "peer_relative_valuation",
+        "valuation_multiple",
+    },
+}
+
+_MAX_VARIABLES_PER_EVIDENCE = 2
+_LONG_SUMMARY_TOKENS = [
+    "电话会",
+    "摘要",
+    "管理层",
+    "增长动能",
+    "长期目标",
+    "展望",
+    "guidance",
+    "outlook",
+]
+_BUSINESS_DIMENSION_TOKENS = [
+    "云业务",
+    "广告业务",
+    "本地生活",
+    "国际业务",
+    "AIDC",
+    "菜鸟",
+    "电商",
+    "金融科技",
+    "游戏",
+    "数据中心",
+    "automotive",
+    "cloud",
+    "ads",
 ]
 
 _WEAK_VARIABLE_TOKENS = [
@@ -166,7 +288,7 @@ def _summarize_variable(items: list[Evidence]) -> str:
 
 
 def _is_structured_metric_evidence(item: Evidence) -> bool:
-    if item.is_noise or item.is_truncated:
+    if item.is_noise or item.is_truncated or item.cross_entity_contamination or not item.can_enter_main_chain:
         return False
     if item.evidence_type != "data":
         return False
@@ -175,8 +297,51 @@ def _is_structured_metric_evidence(item: Evidence) -> bool:
     return bool(_COMPLETE_METRIC_PATTERN.search(item.content))
 
 
+def _normalized_metric_name(item: Evidence) -> str | None:
+    if not item.metric_name:
+        return None
+    return re.sub(r"[\s\-]+", "_", item.metric_name.strip().lower())
+
+
+def _has_metric_value(item: Evidence) -> bool:
+    return item.metric_value is not None or bool(_COMPLETE_METRIC_PATTERN.search(item.content))
+
+
+def _metric_allowed_for_variable(item: Evidence, variable_name: str) -> bool:
+    metric_name = _normalized_metric_name(item)
+    if not metric_name:
+        return False
+    return metric_name in _VARIABLE_METRIC_WHITELIST.get(variable_name, set())
+
+
+def _content_keyword_matches(item: Evidence, keywords: list[str]) -> bool:
+    lowered = item.content.lower()
+    return any(keyword.lower() in lowered for keyword in keywords)
+
+
+def _is_long_mixed_summary(item: Evidence) -> bool:
+    text = item.content
+    lowered = text.lower()
+    if item.metric_name:
+        return False
+    business_hits = sum(1 for token in _BUSINESS_DIMENSION_TOKENS if token.lower() in lowered or token in text)
+    metric_group_hits = sum(
+        1
+        for keywords in [
+            ["营业收入", "营收", "revenue"],
+            ["毛利率", "净利润", "EBITA", "margin"],
+            ["经营现金流", "自由现金流", "资本开支", "cash flow", "capex"],
+            ["PE", "PB", "EV/EBITDA", "估值"],
+            ["市场份额", "同行", "竞争"],
+        ]
+        if any(keyword.lower() in lowered for keyword in keywords)
+    )
+    has_summary_marker = any(token.lower() in lowered for token in _LONG_SUMMARY_TOKENS)
+    return len(text) >= 90 and (has_summary_marker or business_hits >= 3 or metric_group_hits >= 3)
+
+
 def _can_drive_variable(item: Evidence, requires_structured_metric: bool) -> bool:
-    if item.is_noise:
+    if item.is_noise or item.cross_entity_contamination or not item.can_enter_main_chain:
         return False
     if any(token in item.content for token in _WEAK_VARIABLE_TOKENS):
         return False
@@ -185,17 +350,50 @@ def _can_drive_variable(item: Evidence, requires_structured_metric: bool) -> boo
     return not item.is_truncated and (item.evidence_score or item.quality_score or 0) >= 0.35
 
 
+def _variable_match_score(item: Evidence, name: str, keywords: list[str], requires_structured_metric: bool) -> int | None:
+    if item.is_noise or item.is_truncated or item.cross_entity_contamination or not item.can_enter_main_chain:
+        return None
+    if any(token in item.content for token in _WEAK_VARIABLE_TOKENS):
+        return None
+
+    metric_name = _normalized_metric_name(item)
+    if metric_name and name in _VARIABLE_METRIC_WHITELIST:
+        if _metric_allowed_for_variable(item, name) and _has_metric_value(item):
+            return 100
+        return None
+
+    if not _content_keyword_matches(item, keywords):
+        return None
+
+    if requires_structured_metric:
+        if _is_long_mixed_summary(item):
+            return None
+        if not _is_structured_metric_evidence(item):
+            return None
+        return 20
+
+    if not _can_drive_variable(item, requires_structured_metric):
+        return None
+    return 10
+
+
+def _candidate_variables_for_evidence(item: Evidence) -> list[tuple[str, str, int]]:
+    candidates: list[tuple[str, str, int]] = []
+    for name, category, keywords, requires_structured_metric in _VARIABLE_SPECS:
+        score = _variable_match_score(item, name, keywords, requires_structured_metric)
+        if score is not None:
+            candidates.append((name, category, score))
+    candidates.sort(key=lambda value: value[2], reverse=True)
+    return candidates[:_MAX_VARIABLES_PER_EVIDENCE]
+
+
 def normalize_variables(evidence: list[Evidence]) -> list[ResearchVariable]:
     """Group raw evidence into investment variables used by reasoning and decisions."""
 
     grouped: dict[tuple[str, str], list[Evidence]] = defaultdict(list)
     for item in evidence:
-        for name, category, keywords, requires_structured_metric in _VARIABLE_SPECS:
-            if any(keyword.lower() in item.content.lower() for keyword in keywords) and _can_drive_variable(
-                item,
-                requires_structured_metric,
-            ):
-                grouped[(name, category)].append(item)
+        for name, category, _score in _candidate_variables_for_evidence(item):
+            grouped[(name, category)].append(item)
 
     variables: list[ResearchVariable] = []
     for (name, category), items in grouped.items():

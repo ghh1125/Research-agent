@@ -149,6 +149,13 @@ ACTION_STATUS_LABELS = {
     "running": "执行中",
     "done": "已完成",
     "skipped": "已跳过",
+    "skipped_duplicate_query": "因与已执行查询高度重复，未重复检索",
+    "skipped_low_expected_yield": "预期补证收益较低，暂未执行",
+    "skipped_source_budget_exceeded": "受本轮来源预算限制，未执行",
+    "skipped_no_official_target_source": "缺少可用官方目标源，暂未执行",
+    "attempted_no_new_evidence": "已执行，但没有新增可用证据",
+    "attempted_low_quality_only": "已检索但仅新增低质量证据，未纳入判断",
+    "attempted_but_not_covering_gap": "已执行，但未覆盖目标证据缺口",
 }
 
 PRIORITY_LABELS = {
@@ -527,6 +534,7 @@ def _build_action_section(judgment: Judgment) -> ReportSection:
             f"  检索模板：{'；'.join(item.query_templates)}\n"
             f"  目标来源：{'、'.join(item.target_sources or item.source_targets)}\n"
             f"  状态：{_label(ACTION_STATUS_LABELS, item.status)}"
+            + (f"\n  状态说明：{item.status_reason}" if item.status_reason else "")
         )
         for item in judgment.research_actions
     ]
