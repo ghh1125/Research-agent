@@ -20,9 +20,206 @@ query
 
 这份 README 只做一件事：
 
-> 帮你从 0 到 1 看懂当前版本的 pipeline，每一步在干什么，输入输出是什么。
+> 帮你从 0 到 1 跑起来这个系统，并看懂当前版本的 pipeline。
 
-## 1. 系统最终产物
+## 1. 快速开始
+
+### 1.1 进入项目
+
+```bash
+cd /Users/ghh/Documents/Code/mcpify/research-agent
+```
+
+### 1.2 创建虚拟环境并安装依赖
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+如果你已经有 `.venv`，直接激活即可：
+
+```bash
+source .venv/bin/activate
+```
+
+### 1.3 配置环境变量
+
+复制示例配置：
+
+```bash
+cp .env.example .env
+```
+
+最小可用配置：
+
+```env
+DASHSCOPE_API_KEY=your_key
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DASHSCOPE_MODEL=qwen3.6-max-preview
+SEARCH_PROVIDER=auto
+TAVILY_API_KEY=your_tavily_key
+```
+
+常用配置项：
+
+| 变量 | 作用 | 是否必需 |
+| --- | --- | --- |
+| `DASHSCOPE_API_KEY` | LLM 调用 key | 建议配置 |
+| `DASHSCOPE_BASE_URL` | DashScope OpenAI-compatible endpoint | 建议配置 |
+| `DASHSCOPE_MODEL` | LLM 模型名 | 建议配置 |
+| `OPENAI_API_KEY` | OpenAI-compatible fallback | 可选 |
+| `OPENAI_MODEL` | fallback 模型名 | 可选 |
+| `SEARCH_PROVIDER` | 搜索 provider，通常用 `auto` | 建议配置 |
+| `TAVILY_API_KEY` | Tavily 搜索 key | 推荐 |
+| `SERPER_API_KEY` | Serper 搜索 key | 可选 |
+| `GOOGLE_SEARCH_API_KEY` | Google Custom Search key | 可选 |
+| `GOOGLE_SEARCH_CX` | Google Custom Search CX | 可选 |
+| `EXA_API_KEY` | Exa 搜索 key | 可选 |
+| `FINNHUB_API_KEY` | 金融快照 provider | 可选 |
+| `MASSIVE_API_KEY` | 金融快照 provider | 可选 |
+
+说明：
+
+- 没有搜索 key 时，检索质量会下降。
+- 没有金融数据 key 时，`financial_snapshot` 可能为空或走 fallback。
+- 没有 LLM key 时，部分步骤会走 fallback，demo 仍可能跑通，但质量会下降。
+
+## 2. 怎么使用
+
+### 2.1 Streamlit 页面
+
+这是 demo 最主要的使用方式。
+
+启动：
+
+```bash
+source .venv/bin/activate
+streamlit run streamlit_app.py
+```
+
+打开浏览器后输入研究问题，例如：
+
+```text
+我想买阿里巴巴的股票，你觉得是否值得进一步研究
+```
+
+页面会显示：
+
+- 当前建议
+- 置信度
+- 一句话结论
+- 下一步研究动作
+- 财务质量
+- 风险压力
+- 证据质量
+- 缺口地图
+- 关键证据
+- 给用户的研究建议
+
+默认折叠：
+
+- `展开查看研究备忘录`
+- `开发者模式`
+
+### 2.2 FastAPI 服务
+
+启动 API：
+
+```bash
+source .venv/bin/activate
+uvicorn app.main:app --reload
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+运行研究：
+
+```bash
+curl -X POST http://127.0.0.1:8000/research \
+  -H "Content-Type: application/json" \
+  -d '{"query":"我想买阿里巴巴的股票，你觉得是否值得进一步研究"}'
+```
+
+API 返回的核心字段：
+
+- `topic`
+- `questions`
+- `sources`
+- `evidence`
+- `variables`
+- `roles`
+- `judgment`
+- `auto_research_trace`
+- `executive_summary`
+- `financial_snapshot`
+- `report`
+- `dashboard_view`
+
+### 2.3 直接用 Python 调 pipeline
+
+如果你只想在脚本或 notebook 里调用后端：
+
+```bash
+source .venv/bin/activate
+python - <<'PY'
+from app.agent.pipeline import research_pipeline
+
+result = research_pipeline("我想买阿里巴巴的股票，你觉得是否值得进一步研究")
+dashboard = result["dashboard_view"]
+
+print(dashboard["headline"])
+print(dashboard["next_action"])
+PY
+```
+
+这会直接调用同一条后端主链，不经过 Streamlit。
+
+### 2.4 CLI 说明
+
+当前项目没有独立封装 `research-agent` 命令行工具，也没有 Typer/Click CLI。
+
+实际可用的命令行方式是：
+
+- 用 `streamlit run streamlit_app.py` 启动页面
+- 用 `uvicorn app.main:app --reload` 启动 API
+- 用 `python - <<'PY' ... PY` 直接调用 `research_pipeline()`
+
+## 3. 验证和测试
+
+跑全部测试：
+
+```bash
+source .venv/bin/activate
+pytest -q
+```
+
+检查 diff 格式：
+
+```bash
+git diff --check
+```
+
+编译检查：
+
+```bash
+python -m compileall app tests streamlit_app.py
+```
+
+建议提交前至少跑：
+
+```bash
+pytest -q
+git diff --check
+python -m compileall app tests streamlit_app.py
+```
+
+## 4. 系统最终产物
 
 用户输入一句话，例如：
 
@@ -52,7 +249,7 @@ query
    - `raw_evidence`
    - `debug_stats`
 
-## 2. 主入口
+## 5. 主入口
 
 当前统一入口是：
 
@@ -77,7 +274,7 @@ query
 - `report`
 - `dashboard_view`
 
-## 3. Pipeline 总览
+## 6. Pipeline 总览
 
 ### Step 1. `define`
 
@@ -777,7 +974,7 @@ query
 
 > Streamlit 只是 renderer，不是推理层。
 
-## 4. 最重要的数据对象
+## 7. 最重要的数据对象
 
 如果你想快速看懂整个系统，优先看这 8 个对象：
 
@@ -792,7 +989,7 @@ query
 
 它们串起来，就是当前版本的完整认知路径。
 
-## 5. 当前产品化结果
+## 8. 当前产品化结果
 
 ### 默认面向用户
 
@@ -826,7 +1023,7 @@ query
 - `report`
 - `dashboard_view`
 
-## 6. 如果你要继续读源码，建议顺序
+## 9. 如果你要继续读源码，建议顺序
 
 按这个顺序最容易看懂：
 
