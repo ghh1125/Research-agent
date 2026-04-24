@@ -1,24 +1,80 @@
 # Research Agent MVP
 
-一个基于 FastAPI 的投研研究引擎 demo。系统不会从 query 直接生成结论，而是把模糊研究问题依次经过 `define -> decompose -> retrieve -> extract -> reason -> action -> report` 流水线，先构建结构化 `Judgment`，再输出最终 `ResearchReport`。
+一个“先研究、再结论”的投研引擎 demo。系统不会从 query 直接回答，而是按固定 pipeline 先产出结构化研究过程，再给出 `Judgment`、`ExecutiveSummary` 和 `ResearchReport`。
 
-## 项目简介
+## 项目定位
 
 - 输入：自然语言研究问题
-- 输出：结构化研究过程 + 最终报告（JSON）
-- 检索：支持 Tavily、Serper/Google、Google Custom Search、Exa 多源搜索；未配置的 provider 自动跳过
-- 检索 provider：支持 `auto` / `tavily`，默认 `auto`
-- 存储：第一版使用内存 repository
+- 输出：`topic/questions/sources/evidence/variables/judgment/report` 全链路结构化结果
+- 目标：把结论绑定到来源与证据，支持复核和追溯
+- 存储：当前版本使用内存 repository（`InMemoryResearchRepository`）
 
-这个 demo 要证明的是：LLM 不只是会聊天和总结，也可以像一个初级研究员一样，先理解问题、搭建研究框架、获取资料、提取证据、形成证据约束判断，并给出下一步研究建议与最终报告视图。
+这个项目不是聊天问答机器人，也不是投资买卖决策系统。
 
-## 这不是什么
+## 端到端 Pipeline
 
-- 不是聊天机器人
-- 不是直接从 query 生成答案的问答系统
-- 不是投资买卖决策系统
+当前 `research_pipeline(query)` 的实际顺序是：
 
-系统必须先走完整研究流程，再生成 judgment 与 report。
+1. `define`：定义研究对象、目标、对象类型与上市状态
+2. `decompose`：把大问题拆成研究子问题（财务、行业、估值、风险等）
+3. `financial_snapshot`：拉取结构化金融快照（可用时）
+4. `retrieve`：注入官方源 + 多源检索 + 去重 + 富化 + 排序
+5. `extract`：从来源文本中提取结构化证据
+6. `variable`：把证据归纳成关键变量
+7. `reason`：生成初步判断、风险、不确定性、置信度与证据缺口
+8. `action`：生成下一步补证动作
+9. `auto_research`：低置信度时自动补证
+10. `investment`：输出研究流程层面的处理建议（非买卖建议）
+11. `roles`：多角色复核与补充视角
+12. `report`：生成最终报告与执行摘要
+
+早停逻辑：
+
+- 检索来源为空且金融快照不可用，会直接生成“研究不足”报告
+- 自动补证后有效证据仍不足（<3），会标记低置信度早停原因
+
+## 证据提取是怎么做的
+
+`extract` 不是简单摘要，而是“LLM 提名 + 规则审计 + 主链路过滤”：
+
+1. 来源文本准备
+
+- 优先使用富化后的正文（`enriched_content`），其次使用抓取正文与原始 content
+- PDF 来源会先经过 PDF 解析服务再进入抽取
+
+2. LLM 结构化抽取（候选证据）
+
+- 使用固定 prompt 输出 JSON schema，不允许自由发挥
+- 每条候选包含：`metric_name/metric_value/unit/period/entity/segment/quote/extraction_confidence`
+- 同时标记：`is_estimate`、`requires_cross_check`
+
+3. 规则校验（硬门槛）
+
+- 跨主体污染过滤：候选实体与目标研究对象不一致会被拒绝
+- 引句落地校验：抽出的数值必须能在 quote 中对上
+- 截断数字过滤：不完整数字片段拒绝进入主链路
+- period 格式校验：格式异常拒绝
+- 弱来源加严：弱来源在低置信度下会被拒绝
+
+4. 去重与编号
+
+- 按 `metric_name + metric_value + period + segment` 去重
+- 通过校验后生成标准 `Evidence`，统一编号 `e1/e2/...`
+
+5. 补充结构化金融证据
+
+- `financial_snapshot` 的指标会额外转成 evidence，和抽取证据一起参与后续判断
+
+6. 判断前二次过滤
+
+- `reason` 阶段会再次筛选主链路证据：去噪、去截断、去跨主体、要求 grounded、要求最低分
+
+## LLM 与规则分别做什么
+
+- LLM：理解问题、拆解问题、结构化抽取候选证据、生成判断草案
+- 规则层：来源治理、证据校验、覆盖度判定、置信度收敛、早停控制
+
+目标是减少“看起来像答案但无法验证”的输出。
 
 ## 目录结构
 
@@ -30,17 +86,20 @@ research-agent/
 │   ├── dependencies.py
 │   ├── api/
 │   ├── agent/
+│   │   ├── pipeline.py
+│   │   └── steps/
 │   ├── models/
 │   ├── services/
 │   └── db/
 ├── tests/
+├── streamlit_app.py
 ├── .env.example
 ├── requirements.txt
 ├── README.md
 └── AGENTS.md
 ```
 
-## 安装方法
+## 安装
 
 ```bash
 cd /Users/ghh/Documents/Code/mcpify/research-agent
@@ -51,18 +110,32 @@ pip install -r requirements.txt
 
 ## 环境变量
 
-复制 `.env.example` 为 `.env`，可选配置：
+复制 `.env.example` 为 `.env`。
+
+最小可用配置：
 
 ```env
-DASHSCOPE_API_KEY=your_dashscope_api_key_here
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-DASHSCOPE_MODEL=qwen-plus
+DASHSCOPE_API_KEY=your_key
+SEARCH_PROVIDER=auto
+TAVILY_API_KEY=your_tavily_key
+```
 
+常用变量（按模块分组）：
+
+```env
+# LLM
+DASHSCOPE_API_KEY=
+DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+DASHSCOPE_MODEL=qwen3.6-max-preview
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5
+
+# 检索
 SEARCH_PROVIDER=auto
 SEARCH_TIMEOUT_SECONDS=20
 RETRIEVE_MAX_SOURCES=15
 RETRIEVE_PER_QUESTION_LIMIT=4
-TAVILY_API_KEY=your_tavily_api_key_here
+TAVILY_API_KEY=
 TAVILY_BASE_URL=https://api.tavily.com/search
 TAVILY_MAX_RESULTS=8
 TAVILY_DAYS=180
@@ -76,23 +149,20 @@ GOOGLE_SEARCH_MAX_RESULTS=8
 EXA_API_KEY=
 EXA_BASE_URL=https://api.exa.ai/search
 EXA_MAX_RESULTS=8
+
+# 金融/补充源
+FINNHUB_API_KEY=
+FINNHUB_BASE_URL=https://finnhub.io/api/v1
+MASSIVE_API_KEY=
+MASSIVE_BASE_URL=https://api.massive.com
+SEC_USER_AGENT_EMAIL=research-agent@example.com
+SUPPLEMENTAL_SEARCH_ENABLED=true
 ```
 
-没有配置 API Key 时，`define/reason` 会自动走 deterministic fallback，demo 仍可运行。
-LLM 默认使用阿里云 DashScope 的 OpenAI-compatible 接口。最少需要配置 `DASHSCOPE_API_KEY`，模型可先用 `qwen3.6-max-preview`；如果你要更强模型，可以把 `DASHSCOPE_MODEL` 改成你账号可用的模型名。
-如果 `SEARCH_PROVIDER=auto`，系统会使用已配置的多源搜索 provider。当前支持 Tavily、Serper、Google Custom Search、Exa；未配置 API key 的 provider 会自动跳过，至少需要配置其中一个真实搜索 key。
-检索相关 API 参数也已经抽到 env，包括请求超时、每次 retrieve 最多保留多少 source、每个子问题最多保留多少 source、以及各搜索 provider 单次返回多少结果。
+说明：
 
-搜索 API 当前支持：
-
-- `SEARCH_PROVIDER=auto` 或 `SEARCH_PROVIDER=tavily`
-- `TAVILY_API_KEY=你的 Tavily key`
-- `SERPER_API_KEY=你的 Serper key`
-- `GOOGLE_SEARCH_API_KEY=你的 Google Search key`
-- `GOOGLE_SEARCH_CX=你的 Google Programmable Search CX`
-- `EXA_API_KEY=你的 Exa key`
-
-如果没有任何搜索 key，真实检索会失败；请至少配置一个 provider。SEC EDGAR、Yahoo Finance、公司 IR 官网入口会作为投研对象相关的补充来源参与检索增强。
+- `define/reason` 的 LLM 调用失败时，系统会走 deterministic fallback，demo 可继续运行
+- 搜索 provider 按 key 自动启用，未配置 key 的 provider 会自动跳过
 
 ## 启动方式
 
@@ -104,25 +174,13 @@ source .venv/bin/activate
 streamlit run streamlit_app.py
 ```
 
-页面会调用已经实现好的 `research_pipeline(query)`，不重新实现运行逻辑，只把 pipeline 返回的结构化结果按步骤展示：
-
-- 明确研究对象
-- 拆解研究框架
-- 多视角真实检索：事实流 / 风险流 / 反证流
-- 提取有效证据
-- 形成关键变量
-- 综合研究判断
-- 下一步研究动作
-- 自动补证记录
-- 执行摘要与早停原因
-- 投资层处理建议
-- 多角色投研团队
-- 可验证研究报告
+页面只负责展示，底层仍调用同一个 `research_pipeline(query)`。
 
 ### FastAPI 服务
 
 ```bash
 cd /Users/ghh/Documents/Code/mcpify/research-agent
+source .venv/bin/activate
 uvicorn app.main:app --reload
 ```
 
@@ -132,56 +190,34 @@ uvicorn app.main:app --reload
 curl http://127.0.0.1:8000/health
 ```
 
-## 示例请求
+## API 示例
+
+请求：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/research \
   -H "Content-Type: application/json" \
-  -d '{"query":"研究贸易企业违约原因"}'
+  -d '{"query":"研究宁德时代是否值得进一步研究"}'
 ```
 
-示例响应：
+返回字段（核心）：
 
-```json
-{
-  "topic": {"id": "topic_xxxxxxxx", "query": "研究贸易企业违约原因", "entity": null, "topic": "贸易企业违约原因", "goal": "...", "type": "theme", "hypothesis": null},
-  "questions": [{"id": "q1", "topic_id": "topic_xxxxxxxx", "content": "...", "priority": 1, "covered": false}],
-  "sources": [{"id": "s1", "question_id": "q1", "title": "...", "url": "https://example.com/...", "source_type": "website", "provider": "tavily", "tier": "professional", "source_score": 0.72, "contains_entity": true, "is_recent": true, "published_at": null, "content": "..."}],
-  "evidence": [{"id": "e1", "topic_id": "topic_xxxxxxxx", "question_id": "q1", "source_id": "s1", "content": "...", "evidence_type": "data", "stance": "support", "source_tier": "professional", "source_score": 0.72, "relevance_score": 0.8, "clarity_score": 0.76, "recency_score": 1.0, "evidence_score": 0.76, "timestamp": null}],
-  "judgment": {
-    "topic_id": "topic_xxxxxxxx",
-    "conclusion": "基于当前证据，贸易企业违约原因的初步判断是：现金流承压、高杠杆、客户或业务集中是最值得优先解释的问题。",
-    "conclusion_evidence_ids": ["e1", "e2"],
-    "clusters": [{"theme": "高杠杆风险", "support_evidence_ids": ["e1"], "counter_evidence_ids": []}],
-    "risk": [{"text": "高杠杆风险", "evidence_ids": ["e1"]}],
-    "unknown": ["样本覆盖范围仍有限"],
-    "evidence_gaps": [{"question_id": "q2", "text": "子问题证据不足：...", "importance": "high"}],
-    "confidence": "low",
-    "confidence_basis": {"source_count": 2, "source_diversity": "medium", "conflict_level": "partial", "evidence_gap_level": "high", "effective_evidence_count": 2, "has_official_source": false, "official_evidence_count": 0, "weak_source_only": true},
-    "research_actions": [{"id": "a1", "priority": "high", "objective": "补齐现金流和财报数据", "reason": "...", "required_data": ["营收", "净利润", "经营现金流"], "query_templates": ["{entity} 财报 营收 净利润 现金流"], "source_targets": ["official filings", "investor relations"], "status": "pending"}]
-  },
-  "auto_research_trace": [{"round_index": 1, "triggered": true, "selected_action_ids": ["a1"], "executed_queries": ["贸易企业 财报 营收 净利润 现金流"], "new_source_ids": ["s6"], "new_evidence_ids": ["e9"], "covered_gap_question_ids": ["q1"], "effectiveness_status": "effective", "stop_reason": "完成本轮补证，final_confidence=low"}],
-  "executive_summary": {"one_line_conclusion": "...", "top_risk": "...", "next_action": "...", "confidence": "low", "research_time_minutes": 120},
-  "early_stop_reason": null,
-  "report": {
-    "id": "report_xxxxxxxx",
-    "generated_at": "2026-04-17T00:00:00+00:00",
-    "report_sections": [
-      {"title": "研究问题", "section_type": "background", "body": "...", "evidence_ids": []},
-      {"title": "研究框架", "section_type": "framework", "body": "...", "evidence_ids": []},
-      {"title": "核心发现", "section_type": "finding", "body": "...", "evidence_ids": ["e1", "e2"]},
-      {"title": "主要风险", "section_type": "risk", "body": "...", "evidence_ids": ["e1"]},
-      {"title": "不确定性与证据缺口", "section_type": "gap", "body": "...", "evidence_ids": []},
-      {"title": "初步判断", "section_type": "judgment", "body": "...", "evidence_ids": ["e1", "e2"]},
-      {"title": "下一步研究建议", "section_type": "action", "body": "...", "evidence_ids": []}
-    ]
-  }
-}
-```
+- `topic`
+- `questions`
+- `sources`
+- `evidence`
+- `variables`
+- `judgment`
+- `auto_research_trace`
+- `executive_summary`
+- `financial_snapshot`
+- `early_stop_reason`
+- `report`
 
-## 测试方式
+## 测试
 
 ```bash
 cd /Users/ghh/Documents/Code/mcpify/research-agent
+source .venv/bin/activate
 pytest
 ```
