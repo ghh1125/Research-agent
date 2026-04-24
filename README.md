@@ -1,423 +1,844 @@
 # Research Agent
 
-一个面向上市公司初筛场景的 AI 投研驾驶舱。
-它不是财报摘要器，也不是荐股机器人。它的目标是用 30 秒告诉用户：
+`Research Agent` 是一个“先走研究流程，再给结论”的投研系统。
 
-- 这家公司现在值不值得继续研究
-- 当前为什么还不能直接下更强判断
-- 最大风险和最大缺口分别是什么
-- 下一步具体应该补什么数据
-- 这些结论当前是否有足够证据支撑
-
-当前版本的产品形态是：
-
-- 后端生成完整研究链路与 `dashboard_view`
-- Streamlit 只渲染 cockpit 和折叠的 `research_memo`
-- 证据、来源、判断、缺口、下一步动作全部由后端生成
-
-## 1. 当前定位
-
-输入：
-
-- 一个自然语言研究问题，例如
-  `我想买阿里巴巴的股票，你觉得是否值得进一步研究`
-
-输出：
-
-- `topic`
-- `questions`
-- `sources`
-- `evidence`
-- `variables`
-- `judgment`
-- `financial_snapshot`
-- `report`
-- `dashboard_view`
-
-其中真正面向普通用户的产物是：
-
-- `dashboard_view`
-- `report.report_display`
-- Streamlit cockpit 首页
-
-其中真正面向开发和审计的产物是：
-
-- `report.report_internal`
-- `developer_payload`
-- `raw_sources / raw_evidence / debug_stats / traces`
-
-## 2. 当前主链
-
-当前代码的研究主链可以概括为：
+如果你第一次看这个项目，最重要的不是先看 UI，而是先理解它的主链：
 
 ```text
-define
--> decompose
+query
+-> topic
+-> questions
 -> financial_snapshot
--> retrieve
--> source governance
--> LLM structured extraction
--> evidence grounding QA
--> evidence validation
--> main-chain evidence registry
--> variable mapping
--> coverage
--> judgment generation
--> judgment post-process
--> action / auto_research
--> investment / roles
--> dashboard projection
--> report generation
--> streamlit cockpit render
+-> sources
+-> evidence
+-> evidence_registry
+-> variables
+-> judgment
+-> dashboard_view
+-> research_memo / report
 ```
 
-和这条主链对应的关键后端模块包括：
+这份 README 只做一件事：
 
-- `app/services/evidence_engine.py`
-- `app/services/llm_evidence_extractor.py`
-- `app/services/llm_evidence_qa.py`
-- `app/services/evidence_registry.py`
-- `app/services/llm_research_depth_qa.py`
-- `app/services/dashboard_projector.py`
-- `app/services/llm_dashboard_summarizer.py`
+> 帮你从 0 到 1 看懂当前版本的 pipeline，每一步在干什么，输入输出是什么。
 
-## 3. 当前版本解决的核心问题
+## 1. 系统最终产物
 
-### 3.1 Source Governance 收紧
-
-系统现在不会因为标题里写了 `Annual Report`、`Revenue Model`、`Investor` 就把第三方站点抬成官方来源。
-
-当前 hard-cap 规则重点约束：
-
-- `monexa.ai`
-- `moomoo.com`
-- `gurufocus.com`
-- `zacks.com`
-- `morningstar.com`
-- `tradingview.com`
-- `globeandmail.com`
-- `theglobeandmail.com`
-- `annualreports.com`
-- `simplywall.st`
-- `statista.com`
-- `fool.com`
-- `motleyfool.com`
-- `seekingalpha.com`
-- `revenue model`
-- `makes money explained`
-- `statistics facts`
-- `stock analysis blog`
-
-这些来源最多只能进入 `professional` 或 `content`，不能进入 `official / company_ir / regulatory`。
-
-### 3.2 Main-Chain Evidence Registry
-
-下游模块不再直接消费 raw evidence。当前合法入口只有 registry：
-
-- `registry.get()`
-- `registry.has()`
-- `registry.filter_existing()`
-- `registry.project_for_display()`
-
-进入 registry 的证据必须满足：
-
-- `can_enter_main_chain=True`
-- 非截断
-- 非噪声
-- 非跨主体污染
-- 来源层级有效
-- `quote/summary` 非空
-- 能通过 grounding / entity match / off-target 检查
-
-这保证了：
-
-- 不会再把断裂引用渲染到用户页
-- off-target report 不会进入 cockpit
-- `curated_evidence` 只来自主链证据
-
-### 3.3 Dashboard Projection
-
-后端统一生成 `dashboard_view`，前端只渲染，不再重算逻辑。
-
-当前 `dashboard_view` 主要包含：
-
-```json
-{
-  "summary_cards": {},
-  "headline": "...",
-  "next_action": {},
-  "financial_quality": {},
-  "risk_pressure": {},
-  "evidence_quality": {},
-  "gap_map": {},
-  "top_variables": [],
-  "top_risks": [],
-  "top_gaps": [],
-  "curated_evidence": [],
-  "recommendation_text": {},
-  "source_quality": {},
-  "depth_summary": {},
-  "research_memo": {},
-  "developer_payload": {}
-}
-```
-
-### 3.4 Human-readable Cockpit
-
-默认首页只展示普通用户真正需要的内容：
-
-1. 当前建议 / 置信度 / 研究位置 / 主链证据数
-2. 一句话结论
-3. 下一步研究动作
-4. 财务质量 / 风险压力 / 证据质量 / 缺口地图
-5. 关键证据
-6. 给用户的研究建议
-
-以下内容默认折叠：
-
-- `research_memo`
-- `raw_sources`
-- `raw_evidence`
-- `debug_stats`
-- `pressure_tests`
-- `multi-agent traces`
-
-## 4. 默认页长什么样
-
-Streamlit 当前页面分成两层：
-
-### 4.1 Cockpit 首页
-
-默认展开，面向普通用户。
-
-包含：
-
-- Verdict / Confidence / Research Position
-- Headline
-- Next Action
-- 四张卡
-- 关键证据（默认最多 8 条）
-- 四段研究建议
-
-### 4.2 折叠层
-
-- `展开查看研究备忘录`
-- `开发者模式`
-
-这保证 demo 首页不再像 debug dump。
-
-## 5. Research Memo 当前内容
-
-`research_memo` 是折叠的结构化研究备忘录，不是默认首页。
-
-当前包含：
-
-- `verdict`
-- `confidence`
-- `headline`
-- `snapshot_dashboard`
-- `financial_quality`
-- `cash_flow_bridge`
-- `valuation`
-- `competition`
-- `bull_case`
-- `bear_case`
-- `what_changes_my_mind`
-- `evidence_gaps`
-- `next_research_actions`
-
-其中几块重点能力已经内建：
-
-- `cash_flow_bridge`
-  - `Operating Cash Flow - Capex = Free Cash Flow`
-  - `FCF - Buybacks - Dividends = Capital Return Coverage`
-- `valuation`
-  - absolute
-  - relative peers
-  - market-implied narrative
-  - rerating triggers
-- `competition`
-  - 通用竞争框架
-  - 同行对比
-  - 护城河/竞争位置保守表达
-
-## 6. 当前的产品约束
-
-### 6.1 UI 只负责展示
-
-Streamlit 不允许：
-
-- 直接读 raw evidence 重新筛证据
-- 自己重算 confidence
-- 自己做 source governance
-- 自己调 LLM 生成结论
-- 自己拼 research judgment
-
-### 6.2 强判断必须保守
-
-当前版本对以下问题做了硬约束：
-
-- 缺估值参照时，不说“便宜 / 低估 / 安全边际明确”
-- 缺市场份额 / 留存 / GMV / take rate 时，不说“护城河强 / 弱”
-- FCF 下滑时，不说 “Improving”
-- buyback / dividend 数据不齐时，不说资本回报覆盖改善
-
-### 6.3 用户页不暴露内部术语
-
-默认用户页不应该出现：
-
-- `logic_gap`
-- `pt1 / pt2 / pt3`
-- `registry`
-- `broken refs`
-- `Under Review / Improving / Healthy`
-- `Revenue=996347CNY million`
-
-## 7. 目录结构
-
-```text
-research-agent/
-├── app/
-│   ├── agent/
-│   │   ├── pipeline.py
-│   │   └── steps/
-│   ├── api/
-│   ├── models/
-│   ├── services/
-│   ├── config.py
-│   └── main.py
-├── tests/
-├── streamlit_app.py
-├── README.md
-├── PRD.md
-├── requirements.txt
-└── .env.example
-```
-
-## 8. 安装
-
-```bash
-cd /Users/ghh/Documents/Code/mcpify/research-agent
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## 9. 环境变量
-
-复制 `.env.example` 为 `.env`。
-
-最小示例：
-
-```env
-DASHSCOPE_API_KEY=your_key
-SEARCH_PROVIDER=auto
-TAVILY_API_KEY=your_tavily_key
-```
-
-常用变量：
-
-```env
-# LLM
-DASHSCOPE_API_KEY=
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-DASHSCOPE_MODEL=qwen3.6-max-preview
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-5
-
-# Search
-SEARCH_PROVIDER=auto
-SEARCH_TIMEOUT_SECONDS=20
-RETRIEVE_MAX_SOURCES=15
-RETRIEVE_PER_QUESTION_LIMIT=4
-TAVILY_API_KEY=
-SERPER_API_KEY=
-GOOGLE_SEARCH_API_KEY=
-GOOGLE_SEARCH_CX=
-EXA_API_KEY=
-
-# Financial / supplemental
-FINNHUB_API_KEY=
-MASSIVE_API_KEY=
-SEC_USER_AGENT_EMAIL=research-agent@example.com
-SUPPLEMENTAL_SEARCH_ENABLED=true
-```
-
-## 10. 启动
-
-### 10.1 Streamlit Demo
-
-```bash
-cd /Users/ghh/Documents/Code/mcpify/research-agent
-source .venv/bin/activate
-streamlit run streamlit_app.py
-```
-
-默认 demo query：
+用户输入一句话，例如：
 
 ```text
 我想买阿里巴巴的股票，你觉得是否值得进一步研究
 ```
 
-### 10.2 FastAPI
+系统最终会产出几层结果：
 
-```bash
-cd /Users/ghh/Documents/Code/mcpify/research-agent
-source .venv/bin/activate
-uvicorn app.main:app --reload
-```
+1. 结构化研究过程
+   - `topic`
+   - `questions`
+   - `sources`
+   - `evidence`
+   - `variables`
+   - `judgment`
 
-健康检查：
+2. 产品化展示结果
+   - `dashboard_view`
+   - `report.report_display`
+   - `research_memo`
 
-```bash
-curl http://127.0.0.1:8000/health
-```
+3. 开发与审计结果
+   - `report.report_internal`
+   - `developer_payload`
+   - `raw_sources`
+   - `raw_evidence`
+   - `debug_stats`
 
-## 11. API 示例
+## 2. 主入口
 
-请求：
+当前统一入口是：
 
-```bash
-curl -X POST http://127.0.0.1:8000/research \
-  -H "Content-Type: application/json" \
-  -d '{"query":"研究阿里巴巴是否值得进一步研究"}'
-```
+- [app/agent/pipeline.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/pipeline.py)
 
-关键返回：
+主函数：
+
+- `research_pipeline(query)`
+
+它负责串起所有 step，并最终返回：
 
 - `topic`
 - `questions`
 - `sources`
 - `evidence`
 - `variables`
+- `roles`
 - `judgment`
-- `financial_snapshot`
 - `auto_research_trace`
 - `executive_summary`
+- `financial_snapshot`
 - `report`
 - `dashboard_view`
 
-## 12. 测试
+## 3. Pipeline 总览
 
-```bash
-cd /Users/ghh/Documents/Code/mcpify/research-agent
-source .venv/bin/activate
-pytest -q
-git diff --check
-python -m compileall app tests streamlit_app.py
-```
+### Step 1. `define`
 
-## 13. 当前版本不是做什么
+模块：
 
-当前版本不做：
+- [app/agent/steps/define.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/define.py)
 
-- 自动买卖建议
-- 仓位建议
-- 自动交易
-- 完整估值模型替代人工研究
-- 多用户审批流
-- 团队权限系统
+输入：
 
-它做的是：
+- 用户原始 `query`
 
-> 把“会生成研究报告的系统”收敛成“普通用户 30 秒能看懂的 AI 投研驾驶舱”。
+输出：
+
+- `Topic`
+
+作用：
+
+- 识别研究对象是谁
+- 识别这是公司、主题、合规问题还是一般问题
+- 判断研究对象是不是上市公司
+- 判断市场类型，例如 `US / HK / A_share`
+- 生成后续研究要围绕的 `topic / goal`
+
+核心输出字段：
+
+- `id`: 主题 id
+- `query`: 原始问题
+- `entity`: 研究对象名称
+- `topic`: 规范化主题名
+- `goal`: 研究目标
+- `type`: `company/theme/compliance/general`
+- `research_object_type`: 研究对象类型
+- `listing_status`: `listed/private/unlisted/...`
+- `market_type`: `A_share/HK/US/...`
+
+一句话理解：
+
+> `define` 把一句自然语言问题，变成一个结构化研究对象。
+
+### Step 2. `decompose`
+
+模块：
+
+- [app/agent/steps/decompose.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/decompose.py)
+
+输入：
+
+- `Topic`
+
+输出：
+
+- `list[Question]`
+
+作用：
+
+- 把大问题拆成多个可检索、可判断的子问题
+- 给每个问题一个 `framework_type`
+- 给每个问题一个适合搜索引擎的 `search_query`
+
+核心输出字段：
+
+- `id`
+- `topic_id`
+- `content`: 分析师可读问题
+- `search_query`: 检索用 query
+- `priority`
+- `framework_type`
+- `coverage_level`
+
+常见 `framework_type`：
+
+- `financial`
+- `credit`
+- `valuation`
+- `industry`
+- `moat`
+- `risk`
+- `governance`
+- `compliance`
+
+一句话理解：
+
+> `decompose` 决定系统接下来“要研究什么”。
+
+### Step 3. `financial_snapshot`
+
+模块：
+
+- [app/services/financial_data_service.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/financial_data_service.py)
+
+输入：
+
+- `Topic`
+- 可能的 ticker / symbol / market
+
+输出：
+
+- `FinancialSnapshot`
+
+作用：
+
+- 补充结构化金融快照
+- 在搜索之前先给系统一个金融数据底稿
+- 如果拿到同行数据，也会写进 `peer_comparison`
+
+核心输出字段：
+
+- `entity`
+- `symbol`
+- `provider`
+- `status`
+- `provider_status`
+- `provider_attempts`
+- `metrics`
+- `peer_symbols`
+- `peer_comparison`
+- `valuation`
+- `note`
+
+`metrics` 的单条结构：
+
+- `name`
+- `value`
+- `unit`
+- `period`
+- `source`
+
+一句话理解：
+
+> `financial_snapshot` 是结构化市场数据层，不替代财报，但能提前给 valuation / peer / financial 维度补底。
+
+### Step 4. `retrieve`
+
+模块：
+
+- [app/agent/steps/retrieve.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/retrieve.py)
+- [app/services/official_source_injector.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/official_source_injector.py)
+- [app/services/content_fetcher.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/content_fetcher.py)
+- [app/services/pdf_service.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/pdf_service.py)
+
+输入：
+
+- `Topic`
+- `Question[]`
+
+输出：
+
+- `Source[]`
+
+作用：
+
+- 多源搜索检索候选来源
+- 注入官方来源
+- 去重
+- 抓取正文
+- enrich 网页与 PDF 内容
+
+`Source` 的核心字段：
+
+- `id`
+- `question_id`
+- `title`
+- `url`
+- `source_type`
+- `provider`
+- `source_origin_type`
+- `tier`
+- `source_score`
+- `contains_entity`
+- `is_pdf`
+- `is_official_pdf`
+- `is_official_target_source`
+- `rejected_reason`
+- `page_type`
+- `pdf_parse_status`
+- `content`
+- `fetched_content`
+- `enriched_content`
+
+一句话理解：
+
+> `retrieve` 决定系统“拿什么资料来研究”。
+
+### Step 5. `source governance`
+
+模块：
+
+- [app/services/evidence_engine.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/evidence_engine.py)
+
+输入：
+
+- 原始 `Source[]`
+- `Topic`
+
+输出：
+
+- 重排和分层后的 `Source[]`
+
+作用：
+
+- 给来源打 tier
+- 判断是否 official / professional / content
+- 做 hard-cap，避免第三方财经站误升 official
+- 判断来源是否可能是目标公司的真实官方来源
+
+这一步会重点修复：
+
+- `Revenue Model` 被误判 official
+- `AnnualReports.com` 被误判 official
+- `GuruFocus / Zacks / TradingView / Monexa / Moomoo` 被误抬 official
+
+一句话理解：
+
+> `source governance` 决定这些资料值不值得信。
+
+### Step 6. `extract`
+
+模块：
+
+- [app/agent/steps/extract.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/extract.py)
+- [app/services/llm_evidence_extractor.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/llm_evidence_extractor.py)
+
+输入：
+
+- `Topic`
+- `Question[]`
+- `Source[]`
+
+输出：
+
+- `Evidence[]`
+
+作用：
+
+- 从网页正文、PDF、表格中抽取结构化证据
+- 抽出财务指标、期间、单位、实体、quote
+- 把非结构化文本变成可以 downstream 消费的证据项
+
+`Evidence` 核心字段：
+
+- `id`
+- `topic_id`
+- `question_id`
+- `source_id`
+- `flow_type`
+- `content`
+- `evidence_type`
+- `stance`
+- `grounded`
+- `is_noise`
+- `is_truncated`
+- `cross_entity_contamination`
+- `can_enter_main_chain`
+- `quality_score`
+- `source_tier`
+- `evidence_score`
+- `metric_name`
+- `metric_value`
+- `unit`
+- `period`
+- `segment`
+- `comparison_type`
+- `yoy_qoq_flag`
+- `currency`
+- `entity`
+- `extraction_confidence`
+
+一句话理解：
+
+> `extract` 把“来源”变成“能引用的证据”。
+
+### Step 7. `evidence grounding QA`
+
+模块：
+
+- [app/services/llm_evidence_qa.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/llm_evidence_qa.py)
+
+输入：
+
+- `target profile`
+- `source metadata`
+- `raw quote`
+- `candidate evidence`
+
+输出：
+
+- evidence 通过 / 降级 / 拒绝结果
+
+作用：
+
+- 检查 value 是不是真的在原文里
+- 检查 period 是否对得上
+- 检查 metric 语义是否匹配
+- 检查是不是 off-target company
+- 检查是不是 forecast / estimate
+- 清理脏 quote
+
+一句话理解：
+
+> 这一步防止 LLM 抽证“看起来像对的，实际上没落地”。
+
+### Step 8. `evidence validation`
+
+模块：
+
+- `extract` 内部规则
+- `reason` 前过滤
+
+输入：
+
+- `Evidence[]`
+
+输出：
+
+- 通过验证的 `Evidence[]`
+
+作用：
+
+- 去截断
+- 去噪声
+- 去跨主体污染
+- 去脏 quote
+- 去无法进入主链的 evidence
+
+一句话理解：
+
+> 这一步把候选证据收紧成可用证据。
+
+### Step 9. `main-chain evidence registry`
+
+模块：
+
+- [app/services/evidence_registry.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/evidence_registry.py)
+
+输入：
+
+- 验证后的 `Evidence[]`
+- `Source[]`
+- `Topic`
+
+输出：
+
+- `EvidenceRegistry`
+
+作用：
+
+- 形成主链证据唯一入口
+- 只允许合法 evidence 进入下游
+- 过滤 broken refs
+- 过滤 off-target evidence
+- 生成 display-safe projection
+
+下游只能通过这些方法消费证据：
+
+- `get()`
+- `has()`
+- `filter_existing()`
+- `project_for_display()`
+
+一句话理解：
+
+> registry 是“主链证据总线”，没有进 registry 的证据都不算正式证据。
+
+### Step 10. `variable`
+
+模块：
+
+- [app/agent/steps/variable.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/variable.py)
+
+输入：
+
+- `EvidenceRegistry`
+- `Evidence[]`
+
+输出：
+
+- `ResearchVariable[]`
+
+作用：
+
+- 把离散 evidence 归并成更稳定的投研变量
+- 让系统从“零散证据”过渡到“可判断的变量层”
+
+`ResearchVariable` 核心字段：
+
+- `name`
+- `category`
+- `value_summary`
+- `direction`
+- `direction_label`
+- `evidence_ids`
+- `direction_notes`
+
+一句话理解：
+
+> variable 层回答的是“这些证据合起来说明什么变量在变好 / 变差 / 不明确”。
+
+### Step 11. `coverage`
+
+模块：
+
+- `reason` 前的 coverage 判断
+- [app/services/llm_research_depth_qa.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/llm_research_depth_qa.py)
+
+输入：
+
+- `Question[]`
+- `EvidenceRegistry`
+- `ResearchVariable[]`
+
+输出：
+
+- 各维度 coverage / gap 结论
+
+作用：
+
+- 判断研究问题是不是已经被覆盖
+- 判断 valuation / industry / moat / financial 是否缺关键证据
+- 生成关键 gap
+
+一句话理解：
+
+> coverage 不回答“好不好”，而是回答“研究到位没有”。
+
+### Step 12. `reason`
+
+模块：
+
+- [app/agent/steps/reason.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/reason.py)
+
+输入：
+
+- `Topic`
+- `Question[]`
+- `EvidenceRegistry`
+- `ResearchVariable[]`
+
+输出：
+
+- `Judgment`
+
+作用：
+
+- 形成主结论
+- 给出 verified facts / probable inferences / pending assumptions
+- 给出风险、缺口、置信度
+- 给出下一步 research actions
+
+`Judgment` 关键字段：
+
+- `conclusion`
+- `conclusion_evidence_ids`
+- `verified_facts`
+- `probable_inferences`
+- `pending_assumptions`
+- `risk`
+- `bear_theses`
+- `pressure_tests`
+- `unknown`
+- `evidence_gaps`
+- `confidence`
+- `confidence_basis`
+- `research_actions`
+- `positioning`
+- `research_scope`
+- `peer_context`
+- `investment_decision`
+- `debug_observability`
+
+一句话理解：
+
+> `reason` 是“把证据转成研究判断”的核心步骤。
+
+### Step 13. `judgment post-process`
+
+模块：
+
+- `reason` 内部后处理
+- `dashboard_projector` 内部保守表达约束
+
+输入：
+
+- `Judgment`
+- `EvidenceRegistry`
+- `depth QA`
+
+输出：
+
+- 降级后的保守 judgment / headline / recommendation text
+
+作用：
+
+- 过滤断裂引用
+- 处理 ignored counter evidence
+- 处理 unsupported claims
+- gap 高时强制收敛表达
+- 缺估值 / 竞争数据时强制保守
+
+一句话理解：
+
+> 这一步防止系统“证据没到位，但话说满了”。
+
+### Step 14. `action`
+
+模块：
+
+- [app/agent/steps/action.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/action.py)
+
+输入：
+
+- `Judgment`
+
+输出：
+
+- `ResearchAction[]`
+
+作用：
+
+- 把 evidence gap 变成下一步研究动作
+
+`ResearchAction` 核心字段：
+
+- `id`
+- `priority`
+- `question`
+- `objective`
+- `reason`
+- `required_data`
+- `search_query`
+- `query_templates`
+- `target_sources`
+- `source_targets`
+- `status`
+- `status_reason`
+- `question_id`
+
+一句话理解：
+
+> action 层决定“下一步具体去查什么”。
+
+### Step 15. `auto_research`
+
+模块：
+
+- [app/agent/steps/auto_research.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/auto_research.py)
+
+输入：
+
+- 当前 `Judgment`
+- `ResearchAction[]`
+- 预算参数
+
+输出：
+
+- `AutoResearchTrace[]`
+- 追加的新 `sources/evidence`
+
+作用：
+
+- 在低置信度或高优先级 gap 时做一轮自动补证
+- 记录补证过程
+
+`AutoResearchTrace` 关键字段：
+
+- `round_index`
+- `triggered`
+- `selected_action_ids`
+- `executed_queries`
+- `new_source_ids`
+- `new_evidence_ids`
+- `covered_gap_question_ids`
+- `effectiveness_status`
+- `stop_reason`
+- `debug_observability`
+
+一句话理解：
+
+> auto_research 是“有限预算下的自动追证”。
+
+### Step 16. `investment / roles`
+
+模块：
+
+- [app/agent/steps/investment.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/investment.py)
+- [app/agent/steps/role.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/role.py)
+
+输入：
+
+- `Judgment`
+
+输出：
+
+- investment layer 结果
+- `ResearchRoleOutput[]`
+
+作用：
+
+- 把 judgment 转成研究优先级建议
+- 产出多角色复核结果
+
+一句话理解：
+
+> 这层不是买卖建议，而是“研究流程层面的动作建议”。
+
+### Step 17. `dashboard projection`
+
+模块：
+
+- [app/services/dashboard_projector.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/dashboard_projector.py)
+- [app/services/llm_dashboard_summarizer.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/llm_dashboard_summarizer.py)
+
+输入：
+
+- `report_internal`
+- `judgment`
+- `variables`
+- `registry`
+- `financial_snapshot`
+
+输出：
+
+- `dashboard_view`
+
+作用：
+
+- 把研究后端产物投影成产品可展示对象
+- 控制用户页默认只显示真正需要的信息
+- 生成人话 headline / next action / recommendation text
+- 生成 `research_memo`
+
+一句话理解：
+
+> projector 负责把“研究结果”变成“产品页面数据”。
+
+### Step 18. `report`
+
+模块：
+
+- [app/agent/steps/report.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/steps/report.py)
+
+输入：
+
+- 全链路对象
+
+输出：
+
+- `ResearchReport`
+
+`ResearchReport` 关键字段：
+
+- `topic`
+- `questions`
+- `sources`
+- `evidence`
+- `variables`
+- `roles`
+- `judgment`
+- `report_sections`
+- `markdown`
+- `report_internal`
+- `report_display`
+
+一句话理解：
+
+> report 是统一打包层，把全链路结果组合成可落地的对象。
+
+### Step 19. `streamlit cockpit render`
+
+模块：
+
+- [streamlit_app.py](/Users/ghh/Documents/Code/mcpify/research-agent/streamlit_app.py)
+
+输入：
+
+- `dashboard_view`
+- `research_memo`
+- `developer_payload`
+
+输出：
+
+- 默认 cockpit 页面
+
+作用：
+
+- 渲染默认页
+- 默认折叠 `research_memo`
+- 默认折叠开发者模式
+
+注意：
+
+- UI 不做业务逻辑
+- UI 不直接消费 raw evidence
+- UI 不重算 confidence
+- UI 不自己调 LLM 改结论
+
+一句话理解：
+
+> Streamlit 只是 renderer，不是推理层。
+
+## 4. 最重要的数据对象
+
+如果你想快速看懂整个系统，优先看这 8 个对象：
+
+1. `Topic`
+2. `Question`
+3. `Source`
+4. `Evidence`
+5. `ResearchVariable`
+6. `FinancialSnapshot`
+7. `Judgment`
+8. `dashboard_view`
+
+它们串起来，就是当前版本的完整认知路径。
+
+## 5. 当前产品化结果
+
+### 默认面向用户
+
+- `dashboard_view`
+- `report.report_display`
+
+### 默认折叠
+
+- `research_memo`
+- `developer_payload`
+
+### API 返回
+
+定义在：
+
+- [app/api/schemas.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/api/schemas.py)
+
+`ResearchResponse` 当前包含：
+
+- `topic`
+- `questions`
+- `sources`
+- `evidence`
+- `variables`
+- `roles`
+- `judgment`
+- `auto_research_trace`
+- `executive_summary`
+- `financial_snapshot`
+- `early_stop_reason`
+- `report`
+- `dashboard_view`
+
+## 6. 如果你要继续读源码，建议顺序
+
+按这个顺序最容易看懂：
+
+1. [app/agent/pipeline.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/agent/pipeline.py)
+2. [app/models/topic.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/models/topic.py)
+3. [app/models/question.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/models/question.py)
+4. [app/models/source.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/models/source.py)
+5. [app/models/evidence.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/models/evidence.py)
+6. [app/services/evidence_registry.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/evidence_registry.py)
+7. [app/models/variable.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/models/variable.py)
+8. [app/models/judgment.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/models/judgment.py)
+9. [app/services/dashboard_projector.py](/Users/ghh/Documents/Code/mcpify/research-agent/app/services/dashboard_projector.py)
+10. [streamlit_app.py](/Users/ghh/Documents/Code/mcpify/research-agent/streamlit_app.py)
+
+这样读，你会先看到“系统怎么想”，再看到“系统怎么展示”。
