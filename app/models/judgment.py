@@ -89,6 +89,12 @@ class ConfidenceBasis(BaseModel):
     has_official_source: bool = False
     official_evidence_count: int = 0
     weak_source_only: bool = False
+    confidence_score: int = 0
+    source_quality_score: int = 0
+    evidence_quality_score: int = 0
+    coverage_score: int = 0
+    conflict_penalty: int = 0
+    critical_gap_penalty: int = 0
 
 
 class ResearchAction(BaseModel):
@@ -109,6 +115,10 @@ class ResearchAction(BaseModel):
         "running",
         "done",
         "skipped",
+        "triggered_for_high_priority_gap",
+        "skipped_sufficient_coverage",
+        "skipped_no_trusted_target_source",
+        "skipped_query_not_actionable",
         "skipped_duplicate_query",
         "skipped_low_expected_yield",
         "skipped_source_budget_exceeded",
@@ -226,4 +236,4 @@ class Judgment(BaseModel):
     reviewer_comment: str | None = None
     approved_by: str | None = None
     overridden_fields: list[str] = Field(default_factory=list)
-    debug_observability: dict[str, int | str] = Field(default_factory=dict)
+    debug_observability: dict[str, object] = Field(default_factory=dict)

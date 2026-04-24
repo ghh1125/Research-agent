@@ -36,4 +36,6 @@ class ResearchReport(BaseModel):
     judgment: Judgment
     report_sections: list[ReportSection]
     markdown: str
+    report_internal: dict[str, object] = Field(default_factory=dict)
+    report_display: dict[str, object] = Field(default_factory=dict)
     generated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

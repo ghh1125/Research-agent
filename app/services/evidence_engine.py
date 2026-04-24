@@ -162,13 +162,36 @@ _AGGREGATOR_DOMAINS = [
 ]
 
 _PROFESSIONAL_AGGREGATOR_DOMAINS = [
+    "monexa.ai",
+    "moomoo.com",
     "tradingview.com",
     "simplywall.st",
     "annualreports.com",
+    "morningstar.com",
+    "theglobeandmail.com",
+    "globeandmail.com",
+    "gurufocus.com",
+    "zacks.com",
+    "fool.com",
+    "motleyfool.com",
+    "seekingalpha.com",
 ]
 
 _RESEARCH_REPOSITORY_DOMAINS = [
     "annualreports.com",
+    "statista.com",
+]
+
+_HARDCAP_SOURCE_TOKENS = [
+    "revenue model",
+    "makes money explained",
+    "statistics facts",
+    "stock analysis blog",
+    "gurufocus",
+    "guru focus",
+    "motley fool",
+    "seekingalpha",
+    "seeking alpha",
 ]
 
 _FINANCIAL_SIGNAL_TOKENS = [
@@ -280,6 +303,9 @@ def _domain_contains(domain: str, domains: list[str]) -> bool:
 def _site_role(domain: str, url_text: str = "", source_type: str = "other") -> str:
     """Classify the publisher's role before page content is allowed to affect tier."""
 
+    normalized_haystack = f"{domain} {url_text}".replace("-", " ")
+    if any(token in normalized_haystack for token in _HARDCAP_SOURCE_TOKENS):
+        return "professional_aggregator"
     regulatory_tokens = ["sec.gov", "csrc.gov.cn", "sse.com.cn", "szse.cn", "hkexnews.hk", "cninfo.com.cn", "ndrc.gov.cn"]
     if source_type == "regulatory" or _domain_contains(domain, regulatory_tokens):
         return "regulatory"
@@ -827,6 +853,36 @@ def is_usable_source(source: Source, topic: Topic) -> bool:
     return score >= 0.22
 
 
+def iter_sources_with_progress(
+    sources: list[Source],
+    *,
+    step: str = "正在解析证据",
+    progress_start: float = 0.3,
+    progress_span: float = 0.4,
+) -> list[tuple[Source, dict[str, int | float | str]]]:
+    total = len(sources)
+    if total == 0:
+        return []
+
+    updates: list[tuple[Source, dict[str, int | float | str]]] = []
+    for index, source in enumerate(sources, start=1):
+        raw_progress = progress_start + progress_span * (index / total)
+        bounded_progress = max(0.0, min(1.0, raw_progress))
+        updates.append(
+            (
+                source,
+                {
+                    "step": step,
+                    "current": index,
+                    "total": total,
+                    "progress": bounded_progress,
+                    "message": f"正在处理来源 {index}/{total}",
+                },
+            )
+        )
+    return updates
+
+
 def rank_sources(sources: list[Source], topic: Topic, limit: int) -> list[Source]:
     usable: list[Source] = []
     for source in sources:
@@ -882,74 +938,3 @@ def rank_sources(sources: list[Source], topic: Topic, limit: int) -> list[Source
         selected.append(source)
 
     return selected[:limit]
-
-
-def relevance_score_for_text(text: str, topic: Topic, source: Source | None = None) -> float:
-    haystack = text.lower()
-    entity = 0.35 if contains_target_entity(text, topic) else 0.0
-    topic_tokens = [token for token in _COMMON_RESEARCH_TOKENS if token in topic.query or token in topic.topic or token in topic.goal]
-    topic_hits = sum(1 for token in topic_tokens if token.lower() in haystack)
-    signal_hits = sum(1 for token in _EVIDENCE_SIGNAL_TOKENS if token.lower() in haystack)
-    source_bonus = 0.1 if source is not None and source.contains_entity else 0.0
-    if topic.type != "company" and not topic.entity:
-        entity = 0.1
-    return max(0.0, min(1.0, round(entity + topic_hits * 0.08 + signal_hits * 0.04 + source_bonus, 3)))
-
-
-def recency_score_for_source(source: Source) -> float:
-    recency_status = source.is_recent
-    if recency_status is None:
-        recency_status = is_recent_source(source)
-    if recency_status is True:
-        return 1.0
-    if recency_status is False:
-        return 0.35
-    return 0.85
-
-
-def score_evidence_text(text: str, source: Source, topic: Topic | None = None) -> tuple[float, list[str]]:
-    clarity_score = text_quality_score(text)
-    source_score = source.source_score if source.source_score is not None else 0.35
-    relevance_score = relevance_score_for_text(text, topic, source) if topic is not None else clarity_score
-    recency_score = recency_score_for_source(source)
-    score = 0.4 * source_score + 0.3 * relevance_score + 0.2 * recency_score + 0.1 * clarity_score
-    notes = [
-        f"clarity_score={clarity_score:.2f}",
-        f"source_score={source_score:.2f}",
-        f"relevance_score={relevance_score:.2f}",
-        f"recency_score={recency_score:.2f}",
-    ]
-    if re.search(r"\d", text):
-        score += 0.06
-        notes.append("has_number")
-    if any(token in text for token in _FINANCIAL_SIGNAL_TOKENS):
-        score += 0.06
-        notes.append("has_financial_signal")
-    if is_gibberish_text(text):
-        score = 0.0
-        notes.append("gibberish_rejected")
-    return max(0.0, min(1.0, round(score, 3))), notes
-
-
-def is_readable_text(text: str) -> bool:
-    return text_quality_score(text) >= 0.28 and not is_gibberish_text(text)
-
-
-def looks_like_noise(text: str) -> bool:
-    compact = re.sub(r"\s+", "", text)
-    lower_text = text.lower()
-    html_like = bool(re.search(r"</?[a-z][^>]*>", lower_text))
-    nav_tokens = ["登录", "注册", "首页", "导航", "免责声明", "版权所有", "cookie", "javascript"]
-    return html_like or any(token in lower_text or token in compact for token in nav_tokens)
-
-
-def is_usable_evidence_text(text: str, source: Source, topic: Topic | None = None) -> bool:
-    score, _ = score_evidence_text(text, source, topic)
-    if looks_like_noise(text):
-        return False
-    if topic is not None and topic.type == "company" and topic.entity:
-        has_entity = contains_target_entity(text, topic) or source.contains_entity
-        relevance = relevance_score_for_text(text, topic, source)
-        if not has_entity and relevance < 0.45:
-            return False
-    return score >= 0.28 and is_readable_text(text)

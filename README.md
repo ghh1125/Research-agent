@@ -1,105 +1,300 @@
-# Research Agent MVP
+# Research Agent
 
-一个“先研究、再结论”的投研引擎 demo。系统不会从 query 直接回答，而是按固定 pipeline 先产出结构化研究过程，再给出 `Judgment`、`ExecutiveSummary` 和 `ResearchReport`。
+一个面向上市公司初筛场景的 AI 投研驾驶舱。
+它不是财报摘要器，也不是荐股机器人。它的目标是用 30 秒告诉用户：
 
-## 项目定位
+- 这家公司现在值不值得继续研究
+- 当前为什么还不能直接下更强判断
+- 最大风险和最大缺口分别是什么
+- 下一步具体应该补什么数据
+- 这些结论当前是否有足够证据支撑
 
-- 输入：自然语言研究问题
-- 输出：`topic/questions/sources/evidence/variables/judgment/report` 全链路结构化结果
-- 目标：把结论绑定到来源与证据，支持复核和追溯
-- 存储：当前版本使用内存 repository（`InMemoryResearchRepository`）
+当前版本的产品形态是：
 
-这个项目不是聊天问答机器人，也不是投资买卖决策系统。
+- 后端生成完整研究链路与 `dashboard_view`
+- Streamlit 只渲染 cockpit 和折叠的 `research_memo`
+- 证据、来源、判断、缺口、下一步动作全部由后端生成
 
-## 端到端 Pipeline
+## 1. 当前定位
 
-当前 `research_pipeline(query)` 的实际顺序是：
+输入：
 
-1. `define`：定义研究对象、目标、对象类型与上市状态
-2. `decompose`：把大问题拆成研究子问题（财务、行业、估值、风险等）
-3. `financial_snapshot`：拉取结构化金融快照（可用时）
-4. `retrieve`：注入官方源 + 多源检索 + 去重 + 富化 + 排序
-5. `extract`：从来源文本中提取结构化证据
-6. `variable`：把证据归纳成关键变量
-7. `reason`：生成初步判断、风险、不确定性、置信度与证据缺口
-8. `action`：生成下一步补证动作
-9. `auto_research`：低置信度时自动补证
-10. `investment`：输出研究流程层面的处理建议（非买卖建议）
-11. `roles`：多角色复核与补充视角
-12. `report`：生成最终报告与执行摘要
+- 一个自然语言研究问题，例如
+  `我想买阿里巴巴的股票，你觉得是否值得进一步研究`
 
-早停逻辑：
+输出：
 
-- 检索来源为空且金融快照不可用，会直接生成“研究不足”报告
-- 自动补证后有效证据仍不足（<3），会标记低置信度早停原因
+- `topic`
+- `questions`
+- `sources`
+- `evidence`
+- `variables`
+- `judgment`
+- `financial_snapshot`
+- `report`
+- `dashboard_view`
 
-## 证据提取是怎么做的
+其中真正面向普通用户的产物是：
 
-`extract` 不是简单摘要，而是“LLM 提名 + 规则审计 + 主链路过滤”：
+- `dashboard_view`
+- `report.report_display`
+- Streamlit cockpit 首页
 
-1. 来源文本准备
+其中真正面向开发和审计的产物是：
 
-- 优先使用富化后的正文（`enriched_content`），其次使用抓取正文与原始 content
-- PDF 来源会先经过 PDF 解析服务再进入抽取
+- `report.report_internal`
+- `developer_payload`
+- `raw_sources / raw_evidence / debug_stats / traces`
 
-2. LLM 结构化抽取（候选证据）
+## 2. 当前主链
 
-- 使用固定 prompt 输出 JSON schema，不允许自由发挥
-- 每条候选包含：`metric_name/metric_value/unit/period/entity/segment/quote/extraction_confidence`
-- 同时标记：`is_estimate`、`requires_cross_check`
+当前代码的研究主链可以概括为：
 
-3. 规则校验（硬门槛）
+```text
+define
+-> decompose
+-> financial_snapshot
+-> retrieve
+-> source governance
+-> LLM structured extraction
+-> evidence grounding QA
+-> evidence validation
+-> main-chain evidence registry
+-> variable mapping
+-> coverage
+-> judgment generation
+-> judgment post-process
+-> action / auto_research
+-> investment / roles
+-> dashboard projection
+-> report generation
+-> streamlit cockpit render
+```
 
-- 跨主体污染过滤：候选实体与目标研究对象不一致会被拒绝
-- 引句落地校验：抽出的数值必须能在 quote 中对上
-- 截断数字过滤：不完整数字片段拒绝进入主链路
-- period 格式校验：格式异常拒绝
-- 弱来源加严：弱来源在低置信度下会被拒绝
+和这条主链对应的关键后端模块包括：
 
-4. 去重与编号
+- `app/services/evidence_engine.py`
+- `app/services/llm_evidence_extractor.py`
+- `app/services/llm_evidence_qa.py`
+- `app/services/evidence_registry.py`
+- `app/services/llm_research_depth_qa.py`
+- `app/services/dashboard_projector.py`
+- `app/services/llm_dashboard_summarizer.py`
 
-- 按 `metric_name + metric_value + period + segment` 去重
-- 通过校验后生成标准 `Evidence`，统一编号 `e1/e2/...`
+## 3. 当前版本解决的核心问题
 
-5. 补充结构化金融证据
+### 3.1 Source Governance 收紧
 
-- `financial_snapshot` 的指标会额外转成 evidence，和抽取证据一起参与后续判断
+系统现在不会因为标题里写了 `Annual Report`、`Revenue Model`、`Investor` 就把第三方站点抬成官方来源。
 
-6. 判断前二次过滤
+当前 hard-cap 规则重点约束：
 
-- `reason` 阶段会再次筛选主链路证据：去噪、去截断、去跨主体、要求 grounded、要求最低分
+- `monexa.ai`
+- `moomoo.com`
+- `gurufocus.com`
+- `zacks.com`
+- `morningstar.com`
+- `tradingview.com`
+- `globeandmail.com`
+- `theglobeandmail.com`
+- `annualreports.com`
+- `simplywall.st`
+- `statista.com`
+- `fool.com`
+- `motleyfool.com`
+- `seekingalpha.com`
+- `revenue model`
+- `makes money explained`
+- `statistics facts`
+- `stock analysis blog`
 
-## LLM 与规则分别做什么
+这些来源最多只能进入 `professional` 或 `content`，不能进入 `official / company_ir / regulatory`。
 
-- LLM：理解问题、拆解问题、结构化抽取候选证据、生成判断草案
-- 规则层：来源治理、证据校验、覆盖度判定、置信度收敛、早停控制
+### 3.2 Main-Chain Evidence Registry
 
-目标是减少“看起来像答案但无法验证”的输出。
+下游模块不再直接消费 raw evidence。当前合法入口只有 registry：
 
-## 目录结构
+- `registry.get()`
+- `registry.has()`
+- `registry.filter_existing()`
+- `registry.project_for_display()`
+
+进入 registry 的证据必须满足：
+
+- `can_enter_main_chain=True`
+- 非截断
+- 非噪声
+- 非跨主体污染
+- 来源层级有效
+- `quote/summary` 非空
+- 能通过 grounding / entity match / off-target 检查
+
+这保证了：
+
+- 不会再把断裂引用渲染到用户页
+- off-target report 不会进入 cockpit
+- `curated_evidence` 只来自主链证据
+
+### 3.3 Dashboard Projection
+
+后端统一生成 `dashboard_view`，前端只渲染，不再重算逻辑。
+
+当前 `dashboard_view` 主要包含：
+
+```json
+{
+  "summary_cards": {},
+  "headline": "...",
+  "next_action": {},
+  "financial_quality": {},
+  "risk_pressure": {},
+  "evidence_quality": {},
+  "gap_map": {},
+  "top_variables": [],
+  "top_risks": [],
+  "top_gaps": [],
+  "curated_evidence": [],
+  "recommendation_text": {},
+  "source_quality": {},
+  "depth_summary": {},
+  "research_memo": {},
+  "developer_payload": {}
+}
+```
+
+### 3.4 Human-readable Cockpit
+
+默认首页只展示普通用户真正需要的内容：
+
+1. 当前建议 / 置信度 / 研究位置 / 主链证据数
+2. 一句话结论
+3. 下一步研究动作
+4. 财务质量 / 风险压力 / 证据质量 / 缺口地图
+5. 关键证据
+6. 给用户的研究建议
+
+以下内容默认折叠：
+
+- `research_memo`
+- `raw_sources`
+- `raw_evidence`
+- `debug_stats`
+- `pressure_tests`
+- `multi-agent traces`
+
+## 4. 默认页长什么样
+
+Streamlit 当前页面分成两层：
+
+### 4.1 Cockpit 首页
+
+默认展开，面向普通用户。
+
+包含：
+
+- Verdict / Confidence / Research Position
+- Headline
+- Next Action
+- 四张卡
+- 关键证据（默认最多 8 条）
+- 四段研究建议
+
+### 4.2 折叠层
+
+- `展开查看研究备忘录`
+- `开发者模式`
+
+这保证 demo 首页不再像 debug dump。
+
+## 5. Research Memo 当前内容
+
+`research_memo` 是折叠的结构化研究备忘录，不是默认首页。
+
+当前包含：
+
+- `verdict`
+- `confidence`
+- `headline`
+- `snapshot_dashboard`
+- `financial_quality`
+- `cash_flow_bridge`
+- `valuation`
+- `competition`
+- `bull_case`
+- `bear_case`
+- `what_changes_my_mind`
+- `evidence_gaps`
+- `next_research_actions`
+
+其中几块重点能力已经内建：
+
+- `cash_flow_bridge`
+  - `Operating Cash Flow - Capex = Free Cash Flow`
+  - `FCF - Buybacks - Dividends = Capital Return Coverage`
+- `valuation`
+  - absolute
+  - relative peers
+  - market-implied narrative
+  - rerating triggers
+- `competition`
+  - 通用竞争框架
+  - 同行对比
+  - 护城河/竞争位置保守表达
+
+## 6. 当前的产品约束
+
+### 6.1 UI 只负责展示
+
+Streamlit 不允许：
+
+- 直接读 raw evidence 重新筛证据
+- 自己重算 confidence
+- 自己做 source governance
+- 自己调 LLM 生成结论
+- 自己拼 research judgment
+
+### 6.2 强判断必须保守
+
+当前版本对以下问题做了硬约束：
+
+- 缺估值参照时，不说“便宜 / 低估 / 安全边际明确”
+- 缺市场份额 / 留存 / GMV / take rate 时，不说“护城河强 / 弱”
+- FCF 下滑时，不说 “Improving”
+- buyback / dividend 数据不齐时，不说资本回报覆盖改善
+
+### 6.3 用户页不暴露内部术语
+
+默认用户页不应该出现：
+
+- `logic_gap`
+- `pt1 / pt2 / pt3`
+- `registry`
+- `broken refs`
+- `Under Review / Improving / Healthy`
+- `Revenue=996347CNY million`
+
+## 7. 目录结构
 
 ```text
 research-agent/
 ├── app/
-│   ├── main.py
-│   ├── config.py
-│   ├── dependencies.py
-│   ├── api/
 │   ├── agent/
 │   │   ├── pipeline.py
 │   │   └── steps/
+│   ├── api/
 │   ├── models/
 │   ├── services/
-│   └── db/
+│   ├── config.py
+│   └── main.py
 ├── tests/
 ├── streamlit_app.py
-├── .env.example
-├── requirements.txt
 ├── README.md
-└── AGENTS.md
+├── PRD.md
+├── requirements.txt
+└── .env.example
 ```
 
-## 安装
+## 8. 安装
 
 ```bash
 cd /Users/ghh/Documents/Code/mcpify/research-agent
@@ -108,11 +303,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 环境变量
+## 9. 环境变量
 
 复制 `.env.example` 为 `.env`。
 
-最小可用配置：
+最小示例：
 
 ```env
 DASHSCOPE_API_KEY=your_key
@@ -120,7 +315,7 @@ SEARCH_PROVIDER=auto
 TAVILY_API_KEY=your_tavily_key
 ```
 
-常用变量（按模块分组）：
+常用变量：
 
 ```env
 # LLM
@@ -130,43 +325,27 @@ DASHSCOPE_MODEL=qwen3.6-max-preview
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-5
 
-# 检索
+# Search
 SEARCH_PROVIDER=auto
 SEARCH_TIMEOUT_SECONDS=20
 RETRIEVE_MAX_SOURCES=15
 RETRIEVE_PER_QUESTION_LIMIT=4
 TAVILY_API_KEY=
-TAVILY_BASE_URL=https://api.tavily.com/search
-TAVILY_MAX_RESULTS=8
-TAVILY_DAYS=180
 SERPER_API_KEY=
-SERPER_BASE_URL=https://google.serper.dev/search
-SERPER_MAX_RESULTS=8
 GOOGLE_SEARCH_API_KEY=
 GOOGLE_SEARCH_CX=
-GOOGLE_SEARCH_BASE_URL=https://www.googleapis.com/customsearch/v1
-GOOGLE_SEARCH_MAX_RESULTS=8
 EXA_API_KEY=
-EXA_BASE_URL=https://api.exa.ai/search
-EXA_MAX_RESULTS=8
 
-# 金融/补充源
+# Financial / supplemental
 FINNHUB_API_KEY=
-FINNHUB_BASE_URL=https://finnhub.io/api/v1
 MASSIVE_API_KEY=
-MASSIVE_BASE_URL=https://api.massive.com
 SEC_USER_AGENT_EMAIL=research-agent@example.com
 SUPPLEMENTAL_SEARCH_ENABLED=true
 ```
 
-说明：
+## 10. 启动
 
-- `define/reason` 的 LLM 调用失败时，系统会走 deterministic fallback，demo 可继续运行
-- 搜索 provider 按 key 自动启用，未配置 key 的 provider 会自动跳过
-
-## 启动方式
-
-### Streamlit 可视化页面
+### 10.1 Streamlit Demo
 
 ```bash
 cd /Users/ghh/Documents/Code/mcpify/research-agent
@@ -174,9 +353,13 @@ source .venv/bin/activate
 streamlit run streamlit_app.py
 ```
 
-页面只负责展示，底层仍调用同一个 `research_pipeline(query)`。
+默认 demo query：
 
-### FastAPI 服务
+```text
+我想买阿里巴巴的股票，你觉得是否值得进一步研究
+```
+
+### 10.2 FastAPI
 
 ```bash
 cd /Users/ghh/Documents/Code/mcpify/research-agent
@@ -190,17 +373,17 @@ uvicorn app.main:app --reload
 curl http://127.0.0.1:8000/health
 ```
 
-## API 示例
+## 11. API 示例
 
 请求：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/research \
   -H "Content-Type: application/json" \
-  -d '{"query":"研究宁德时代是否值得进一步研究"}'
+  -d '{"query":"研究阿里巴巴是否值得进一步研究"}'
 ```
 
-返回字段（核心）：
+关键返回：
 
 - `topic`
 - `questions`
@@ -208,16 +391,33 @@ curl -X POST http://127.0.0.1:8000/research \
 - `evidence`
 - `variables`
 - `judgment`
+- `financial_snapshot`
 - `auto_research_trace`
 - `executive_summary`
-- `financial_snapshot`
-- `early_stop_reason`
 - `report`
+- `dashboard_view`
 
-## 测试
+## 12. 测试
 
 ```bash
 cd /Users/ghh/Documents/Code/mcpify/research-agent
 source .venv/bin/activate
-pytest
+pytest -q
+git diff --check
+python -m compileall app tests streamlit_app.py
 ```
+
+## 13. 当前版本不是做什么
+
+当前版本不做：
+
+- 自动买卖建议
+- 仓位建议
+- 自动交易
+- 完整估值模型替代人工研究
+- 多用户审批流
+- 团队权限系统
+
+它做的是：
+
+> 把“会生成研究报告的系统”收敛成“普通用户 30 秒能看懂的 AI 投研驾驶舱”。

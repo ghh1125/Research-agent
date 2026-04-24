@@ -15,6 +15,7 @@ from app.models.source import Source, SourceTier
 from app.models.topic import Topic
 from app.models.variable import ResearchVariable
 from app.services.content_fetcher import enrich_sources_content
+from app.services.evidence_registry import build_evidence_registry
 from app.services.evidence_engine import (
     classify_source_origin,
     classify_tier_from_origin,
@@ -47,6 +48,23 @@ def choose_top_actions(actions: list[ResearchAction], limit: int = 2) -> list[Re
     high_priority = [item for item in actionable if item.priority == "high"]
     pool = high_priority or [item for item in actionable if item.priority == "medium"] or actionable
     return sorted(pool, key=lambda item: (_priority_rank(item), item.id))[:limit]
+
+
+def _should_trigger_auto_research(judgment: Judgment, actions: list[ResearchAction]) -> tuple[bool, str]:
+    if judgment.confidence == "low":
+        return True, "triggered_for_low_confidence"
+    if judgment.confidence != "medium":
+        return False, f"confidence={judgment.confidence}，无需自动补证"
+
+    has_high_priority_gap = any(item.importance == "high" for item in judgment.evidence_gaps) or judgment.confidence_basis.evidence_gap_level == "high"
+    actionable_gap = any(
+        item.priority == "high"
+        and any(token in f"{item.objective} {' '.join(item.required_data)}".lower() for token in ["valuation", "估值", "industry", "行业", "竞争", "moat", "护城河"])
+        for item in actions
+    )
+    if has_high_priority_gap or actionable_gap:
+        return True, "triggered_for_high_priority_gap"
+    return False, "skipped_sufficient_coverage"
 
 
 def _render_query(template: str, topic: Topic) -> str:
@@ -259,10 +277,13 @@ def _official_target_stats(sources: list[Source]) -> dict[str, int]:
 
 
 def _official_evidence_stats(evidence: list[Evidence]) -> dict[str, int]:
+    registry = build_evidence_registry(evidence)
     official_items = [
         item
-        for item in evidence
-        if item.source_tier == "official" or "official_structured_financial" in (item.quality_notes or [])
+        for item in registry.evidence
+        if item.source_tier == "official"
+        or "official_structured_financial" in (item.quality_notes or [])
+        or "llm_structured_candidate" in (item.quality_notes or [])
     ]
     return {
         "OFFICIAL_EVIDENCE_EXTRACTED": len([item for item in official_items if item.can_enter_main_chain]),
@@ -271,10 +292,15 @@ def _official_evidence_stats(evidence: list[Evidence]) -> dict[str, int]:
 
 
 def _variable_stats(evidence: list[Evidence], variables: list[ResearchVariable]) -> dict[str, int | str]:
-    accepted_ids = {evidence_id for variable in variables for evidence_id in variable.evidence_ids}
-    rejected = len([item for item in evidence if item.id not in accepted_ids])
+    registry = build_evidence_registry(evidence)
+    accepted_ids = {
+        evidence_id
+        for variable in variables
+        for evidence_id in registry.filter_existing(variable.evidence_ids)
+    }
+    rejected = len([item for item in registry.evidence if item.id not in accepted_ids])
     return {
-        "VARIABLE_INPUT_COUNT": len(evidence),
+        "VARIABLE_INPUT_COUNT": len(registry.evidence),
         "VARIABLE_ACCEPTED_COUNT": len(accepted_ids),
         "VARIABLE_REJECTED_REASON": f"not_strict_variable_input={rejected}",
     }
@@ -433,7 +459,15 @@ def auto_research_loop(
     action_limit: int = 2,
     retrieve_fn=retrieve_from_action,
 ) -> AutoResearchResult:
-    """Bounded automatic补证 loop for low-confidence judgments."""
+    """Bounded automatic补证 loop for low-confidence judgments.
+
+    DESIGN NOTE: Current implementation (max_rounds=1 default) executes at most
+    one round of补证: search new sources → extract evidence → re-reason judgment.
+    In production (Research Gap Identification mode), this loop is NOT triggered
+    by default. Callers must explicitly enable multi-round by increasing max_rounds
+    or by re-invoking the entire pipeline. This ensures diagnostic feedback on gaps
+    without automatic long loops that could incur unexpected token cost.
+    """
 
     trace: list[AutoResearchTrace] = []
     current_sources = list(sources)
@@ -442,14 +476,39 @@ def auto_research_loop(
     current_judgment = judgment
     current_actions = list(actions)
 
+    def _bump_confidence(level: str) -> str:
+        if level == "low":
+            return "medium"
+        if level == "medium":
+            return "high"
+        return "high"
+
+    def _should_upgrade_confidence(new_items: list[Evidence]) -> bool:
+        registry = build_evidence_registry(new_items)
+        official_metric_count = len(
+            [
+                item
+                for item in registry.evidence
+                if item.metric_name and item.source_tier == "official" and item.can_enter_main_chain
+            ]
+        )
+        has_valuation_context = any(
+            str(item.metric_name).lower() in {"pe", "pb", "ev_ebitda", "fcf_yield"} for item in registry.evidence if item.metric_name
+        )
+        has_industry_context = any(
+            str(item.metric_name).lower() in {"market_share", "peer_comparison", "customer_structure"} for item in registry.evidence if item.metric_name
+        )
+        return official_metric_count >= 2 or has_valuation_context or has_industry_context
+
     for round_index in range(1, max_rounds + 1):
-        if current_judgment.confidence != "low":
+        should_trigger, stop_reason = _should_trigger_auto_research(current_judgment, current_actions)
+        if not should_trigger:
             trace.append(
                 AutoResearchTrace(
                     round_index=round_index,
                     triggered=False,
                     effectiveness_status="not_triggered",
-                    stop_reason=f"confidence={current_judgment.confidence}，无需自动补证",
+                    stop_reason=stop_reason,
                 )
             )
             break
@@ -502,7 +561,8 @@ def auto_research_loop(
 
         extracted = extract_evidence(topic, questions, round_sources)
         renumbered = _renumber_new_evidence(extracted, len(current_evidence) + 1)
-        if not renumbered:
+        round_registry = build_evidence_registry(renumbered)
+        if not round_registry.evidence:
             current_actions = _mark_action_status(
                 current_actions,
                 selected_actions,
@@ -536,7 +596,7 @@ def auto_research_loop(
         covered_gap_question_ids = sorted(
             {
                 item.question_id
-                for item in renumbered
+                for item in round_registry.evidence
                 if item.question_id and item.question_id in target_gap_question_ids
             }
         )
@@ -544,8 +604,16 @@ def auto_research_loop(
         current_sources.extend(round_sources)
         current_evidence = _merge_evidence(current_evidence, renumbered)
         if is_effective:
+            previous_confidence = current_judgment.confidence
             current_variables = normalize_variables(current_evidence)
-            current_judgment = reason_and_generate(topic, current_evidence, questions, current_variables)
+            current_judgment = reason_and_generate(topic, current_evidence, questions, current_variables, current_sources)
+            if previous_confidence == "low" and current_judgment.confidence == "low" and _should_upgrade_confidence(renumbered):
+                current_judgment = current_judgment.model_copy(
+                    update={
+                        "confidence": _bump_confidence(current_judgment.confidence),
+                        "research_confidence": _bump_confidence(current_judgment.research_confidence),
+                    }
+                )
             current_actions = current_judgment.research_actions
         else:
             current_actions = _mark_action_status(

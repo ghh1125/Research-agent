@@ -12,5 +12,6 @@ class ResearchVariable(BaseModel):
     category: Literal["financial", "operation", "industry", "governance", "valuation", "risk"]
     value_summary: str
     direction: Literal["improving", "deteriorating", "stable", "mixed", "unknown"]
+    direction_label: str | None = None
     evidence_ids: list[str]
     direction_notes: list[str] = Field(default_factory=list)

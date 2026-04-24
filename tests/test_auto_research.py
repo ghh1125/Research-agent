@@ -160,17 +160,25 @@ class AutoResearchLoopTest(unittest.TestCase):
                 )
             ], ["拼多多 财报 现金流"]
 
-        result = auto_research_loop(
-            topic,
-            questions,
-            sources=[],
-            evidence=[],
-            variables=[],
-            judgment=judgment,
-            actions=actions,
-            max_rounds=1,
-            retrieve_fn=fake_retrieve,
-        )
+        with patch(
+            "app.services.llm_evidence_extractor.call_llm",
+            return_value=(
+                '{"evidences":[{"metric_name":"operating_cash_flow","metric_value":12,"unit":"亿元",'
+                '"period":"FY2025","entity":"拼多多","quote":"2025年经营现金流改善至12亿元。",'
+                '"extraction_confidence":0.9}]}'
+            ),
+        ):
+            result = auto_research_loop(
+                topic,
+                questions,
+                sources=[],
+                evidence=[],
+                variables=[],
+                judgment=judgment,
+                actions=actions,
+                max_rounds=1,
+                retrieve_fn=fake_retrieve,
+            )
 
         self.assertTrue(result.trace)
         self.assertTrue(result.trace[0].triggered)
@@ -308,17 +316,25 @@ class AutoResearchLoopTest(unittest.TestCase):
                 )
             ], ["测试公司 行业竞争"]
 
-        result = auto_research_loop(
-            topic,
-            questions,
-            [],
-            [],
-            [],
-            judgment,
-            actions,
-            max_rounds=1,
-            retrieve_fn=fake_retrieve,
-        )
+        with patch(
+            "app.services.llm_evidence_extractor.call_llm",
+            return_value=(
+                '{"evidences":[{"metric_name":"market_share","metric_value":18,"unit":"%",'
+                '"period":"FY2025","entity":"测试公司","quote":"FY2025测试公司市场份额为18%。",'
+                '"extraction_confidence":0.9}]}'
+            ),
+        ):
+            result = auto_research_loop(
+                topic,
+                questions,
+                [],
+                [],
+                [],
+                judgment,
+                actions,
+                max_rounds=1,
+                retrieve_fn=fake_retrieve,
+            )
 
         self.assertEqual(result.trace[0].effectiveness_status, "ineffective")
         self.assertEqual(result.trace[0].covered_gap_question_ids, [])
@@ -396,6 +412,189 @@ class AutoResearchLoopTest(unittest.TestCase):
 
         self.assertEqual(result.actions[0].status, "attempted_low_quality_only")
         self.assertIn("低质量证据", result.actions[0].status_reason or "")
+
+    @patch("app.agent.steps.reason.call_llm", side_effect=RuntimeError("skip llm in unit test"))
+    def test_official_metric_additions_can_upgrade_confidence_after_auto_research(self, reason_llm_mock) -> None:
+        topic = Topic(
+            id="topic_900",
+            query="我想投资阿里巴巴，是否值得进一步研究",
+            topic="阿里巴巴研究价值",
+            goal="判断是否值得继续研究",
+            type="company",
+            entity="阿里巴巴",
+            research_object_type="listed_company",
+        )
+        questions = [
+            Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1, framework_type="financial", coverage_level="covered"),
+            Question(id="q2", topic_id=topic.id, content="估值锚点如何", priority=1, framework_type="valuation", coverage_level="partial"),
+        ]
+        judgment = Judgment(
+            topic_id=topic.id,
+            conclusion="当前证据不足以支撑明确结论",
+            conclusion_evidence_ids=[],
+            clusters=[],
+            risk=[],
+            unknown=["缺少官方来源"],
+            evidence_gaps=[EvidenceGap(question_id="q1", text="缺少官方财务字段", importance="high")],
+            confidence="low",
+            confidence_basis=ConfidenceBasis(
+                source_count=1,
+                source_diversity="low",
+                conflict_level="none",
+                evidence_gap_level="high",
+                effective_evidence_count=1,
+                has_official_source=False,
+                official_evidence_count=0,
+                weak_source_only=True,
+            ),
+            research_actions=[],
+        )
+        actions = [
+            ResearchAction(
+                id="a1",
+                priority="high",
+                objective="补齐官方财务来源",
+                reason="缺少官方财务字段",
+                required_data=["营收", "经营现金流", "估值"],
+                query_templates=["{entity} investor relations quarterly results"],
+                source_targets=["official filings"],
+                question_id="q1",
+            )
+        ]
+
+        def fake_retrieve(topic, questions, action, existing_sources, start_index):
+            return [
+                Source(
+                    id=f"s{start_index}",
+                    question_id="q1",
+                    flow_type="fact",
+                    search_query="阿里巴巴 investor relations quarterly results",
+                    title="Alibaba IR Results",
+                    url="https://www.alibabagroup.com/results",
+                    source_type="company",
+                    provider="fixture",
+                    source_origin_type="company_ir",
+                    tier=SourceTier.TIER1,
+                    source_score=0.95,
+                    content="official content",
+                )
+            ], ["阿里巴巴 investor relations quarterly results"]
+
+        with patch(
+            "app.services.llm_evidence_extractor.call_llm",
+            return_value=(
+                '{"evidences":['
+                '{"metric_name":"revenue","metric_value":996347,"unit":"million","period":"FY2025","entity":"Alibaba","quote":"Revenue was RMB996347 million in FY2025.","extraction_confidence":0.95},'
+                '{"metric_name":"operating_cash_flow","metric_value":163509,"unit":"million","period":"FY2025","entity":"Alibaba","quote":"Operating cash flow was RMB163509 million in FY2025.","extraction_confidence":0.95},'
+                '{"metric_name":"pe","metric_value":12,"unit":"x","period":"TTM","entity":"Alibaba","quote":"PE was 12x.","extraction_confidence":0.9}'
+                ']}'
+            ),
+        ):
+            result = auto_research_loop(
+                topic,
+                questions,
+                sources=[],
+                evidence=[],
+                variables=[],
+                judgment=judgment,
+                actions=actions,
+                max_rounds=1,
+                retrieve_fn=fake_retrieve,
+            )
+
+        self.assertEqual(result.trace[0].effectiveness_status, "effective")
+        self.assertEqual(result.judgment.confidence, "medium")
+
+    @patch("app.agent.steps.reason.call_llm", side_effect=RuntimeError("skip llm in unit test"))
+    def test_medium_confidence_with_high_priority_gap_still_triggers_one_round(self, reason_llm_mock) -> None:
+        topic = Topic(
+            id="topic_medium_gap",
+            query="我想投资阿里巴巴，是否值得进一步研究",
+            topic="阿里巴巴研究价值",
+            goal="判断是否值得继续研究",
+            type="company",
+            entity="阿里巴巴",
+            research_object_type="listed_company",
+        )
+        questions = [
+            Question(id="q1", topic_id=topic.id, content="估值锚点如何", priority=1, framework_type="valuation", coverage_level="uncovered"),
+            Question(id="q2", topic_id=topic.id, content="行业竞争如何", priority=1, framework_type="industry", coverage_level="partial"),
+        ]
+        judgment = Judgment(
+            topic_id=topic.id,
+            conclusion="当前证据支持继续标准研究，但估值和行业缺口仍然明显。",
+            conclusion_evidence_ids=[],
+            clusters=[],
+            risk=[],
+            unknown=["估值和行业竞争仍待补证"],
+            evidence_gaps=[EvidenceGap(question_id="q1", text="缺少估值锚点和同行对比", importance="high")],
+            confidence="medium",
+            confidence_basis=ConfidenceBasis(
+                source_count=2,
+                source_diversity="medium",
+                conflict_level="none",
+                evidence_gap_level="high",
+                effective_evidence_count=3,
+                has_official_source=True,
+                official_evidence_count=2,
+            ),
+            research_actions=[],
+        )
+        actions = [
+            ResearchAction(
+                id="a1",
+                priority="high",
+                objective="补齐估值锚点和同行对比",
+                reason="高优先级估值缺口仍未覆盖",
+                required_data=["PE", "PB", "同行估值", "市场份额"],
+                query_templates=["{entity} valuation peer comparison market share"],
+                source_targets=["recognized data providers", "professional finance media"],
+                question_id="q1",
+            )
+        ]
+
+        def fake_retrieve(topic, questions, action, existing_sources, start_index):
+            return [
+                Source(
+                    id=f"s{start_index}",
+                    question_id="q1",
+                    flow_type="fact",
+                    search_query="阿里巴巴 valuation peer comparison market share",
+                    title="Alibaba peer comparison",
+                    url="https://example.com/alibaba-peer-comparison",
+                    source_type="report",
+                    provider="fixture",
+                    source_origin_type="professional_media",
+                    tier=SourceTier.TIER2,
+                    source_score=0.85,
+                    content="PE was 12x and market share was 18%.",
+                )
+            ], ["阿里巴巴 valuation peer comparison market share"]
+
+        with patch(
+            "app.services.llm_evidence_extractor.call_llm",
+            return_value=(
+                '{"evidences":['
+                '{"metric_name":"pe","metric_value":12,"unit":"x","period":"TTM","entity":"Alibaba","quote":"TTM PE was 12x.","extraction_confidence":0.9},'
+                '{"metric_name":"market_share","metric_value":18,"unit":"%","period":"FY2025","entity":"Alibaba","quote":"FY2025 Market share was 18%.","extraction_confidence":0.9}'
+                ']}'
+            ),
+        ):
+            result = auto_research_loop(
+                topic,
+                questions,
+                sources=[],
+                evidence=[],
+                variables=[],
+                judgment=judgment,
+                actions=actions,
+                max_rounds=1,
+                retrieve_fn=fake_retrieve,
+            )
+
+        self.assertTrue(result.trace)
+        self.assertTrue(result.trace[0].triggered)
+        self.assertEqual(result.trace[0].effectiveness_status, "effective")
 
 
 if __name__ == "__main__":

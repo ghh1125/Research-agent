@@ -8,9 +8,11 @@ import streamlit as st
 from app.agent.pipeline import research_pipeline
 from app.config import get_settings
 from app.models.evidence import Evidence
+from app.agent.steps.report import curate_evidence_for_display
 from app.models.question import Question
 from app.models.role import ResearchRoleOutput
 from app.models.source import Source
+from app.services.display_formatters import humanize_source_type, humanize_tier, sanitize_display_text
 from app.services.search_service import get_search_provider_status
 
 
@@ -109,6 +111,10 @@ ACTION_STATUS_LABELS = {
     "running": "执行中",
     "done": "已完成",
     "skipped": "已跳过",
+    "triggered_for_high_priority_gap": "因高优先级缺口已触发",
+    "skipped_sufficient_coverage": "当前覆盖已足够，暂不补证",
+    "skipped_no_trusted_target_source": "缺少可信目标源，暂不补证",
+    "skipped_query_not_actionable": "当前查询不可执行，暂不补证",
     "skipped_duplicate_query": "因与已执行查询高度重复，未重复检索",
     "skipped_low_expected_yield": "预期补证收益较低，暂未执行",
     "skipped_source_budget_exceeded": "受本轮来源预算限制，未执行",
@@ -654,6 +660,7 @@ def render_sources(sources: list[Source]) -> None:
 
 
 def render_evidence(evidence: list[Evidence], sources: list[Source]) -> None:
+    evidence = curate_evidence_for_display(evidence, sources)
     source_by_id = _source_map(sources)
     grouped: dict[str, list[Evidence]] = defaultdict(list)
     for item in evidence:
@@ -945,7 +952,7 @@ def render_default_brief(result: dict) -> None:
     summary = result.get("executive_summary")
     judgment = result["judgment"]
     decision = judgment.investment_decision
-    evidence = result["evidence"]
+    evidence = curate_evidence_for_display(result["evidence"], result["sources"])
 
     st.markdown("### 首屏结论")
     cols = st.columns(4)
@@ -982,100 +989,231 @@ def render_default_brief(result: dict) -> None:
         )
 
 
+def _render_anchor_evidence(evidence_ids: list[str], evidence_map: dict[str, Evidence], source_map: dict[str, Source]) -> None:
+    for evidence_id in evidence_ids[:2]:
+        item = evidence_map.get(evidence_id)
+        if item is None:
+            continue
+        source = source_map.get(item.source_id)
+        title = item.metric_name or evidence_id
+        body = (
+            f"{item.content}\n\n"
+            f"期间：{item.period or '未注明'}｜来源：{source.title if source is not None else '未知来源'}\n"
+            f"URL：{source.url if source is not None and source.url else '无'}"
+        )
+        _card(title, body, [_badge(item.source_tier or "content", "fact")])
+
+
+def render_cockpit(result: dict) -> None:
+    display = result.get("dashboard_view") or {}
+    memo = display.get("research_memo") or {}
+    summary_cards = display.get("summary_cards", {})
+    next_action = display.get("next_action", {})
+    financial_quality = display.get("financial_quality", {})
+    risk_pressure = display.get("risk_pressure", {})
+    evidence_quality = display.get("evidence_quality", {})
+    gap_map = display.get("gap_map", {})
+
+    top_row = st.columns([1, 1.4, 1.2])
+    with top_row[0]:
+        _card(
+            "当前结论",
+            (
+                f"当前建议：{sanitize_display_text(summary_cards.get('verdict', '观察清单'))}\n"
+                f"置信度：{_label(CONFIDENCE_LABELS, summary_cards.get('confidence', 'low'))}\n"
+                f"研究位置：{sanitize_display_text(summary_cards.get('research_position', '信息不足，待补证'))}\n"
+                f"主链证据数：{summary_cards.get('evidence_count', 0)}"
+            ),
+            [_badge("结论", "fact")],
+        )
+    with top_row[1]:
+        _card(
+            "一句话结论",
+            f"{sanitize_display_text(display.get('headline', '当前证据尚不足以支持明确投资判断。'))}\n\n非投资建议，仅用于研究初筛。",
+            [_badge("结论摘要", "fact")],
+        )
+    with top_row[2]:
+        required_data = next_action.get("required_data") or []
+        _card(
+            "下一步研究动作",
+            (
+                f"查什么：{sanitize_display_text(next_action.get('title', '继续补证'))}\n"
+                f"为什么重要：{sanitize_display_text(next_action.get('why', '关键缺口会影响结论强度'))}\n"
+                f"需要哪些数据：{'、'.join(required_data) if required_data else '待补充'}\n"
+                f"如何影响判断：{sanitize_display_text(next_action.get('decision_impact', '补齐后再决定是否升级研究深度'))}"
+            ),
+            [_badge("下一步", "medium")],
+        )
+
+    second_row = st.columns(4)
+    with second_row[0]:
+        _card(
+            "财务质量",
+            sanitize_display_text(financial_quality.get("summary", "暂无财务质量摘要。")),
+            [_badge("财务", "fact")],
+        )
+    with second_row[1]:
+        risk_lines = "\n".join(f"- {sanitize_display_text(item.get('text', ''))}" for item in risk_pressure.get("top_risks", [])[:3]) or "暂无高置信风险。"
+        _card("风险压力", f"{sanitize_display_text(risk_pressure.get('summary', ''))}\n{risk_lines}".strip(), [_badge("风险", "risk")])
+    with second_row[2]:
+        _card(
+            "证据质量",
+            (
+                f"{sanitize_display_text(evidence_quality.get('summary', ''))}\n"
+                f"官方来源：{evidence_quality.get('official', 0)}｜"
+                f"专业来源：{evidence_quality.get('professional', 0)}｜"
+                f"普通来源：{evidence_quality.get('weak', 0)}\n"
+                f"断裂引用：{evidence_quality.get('broken_refs', 0)}｜"
+                f"跨主体污染：{evidence_quality.get('cross_entity_pollution', 0)}"
+            ).strip(),
+            [_badge("质量", "fact")],
+        )
+    with second_row[3]:
+        gap_lines = "\n".join(
+            f"- {sanitize_display_text(item.get('title', item.get('text', '')))}：{sanitize_display_text(item.get('why_it_matters', ''))}"
+            for item in gap_map.get("top_gaps", [])[:3]
+        ) or "暂无关键缺口。"
+        _card("缺口地图", f"{sanitize_display_text(gap_map.get('summary', ''))}\n{gap_lines}".strip(), [_badge("缺口", "medium")])
+
+    third_row = st.columns(2)
+    with third_row[0]:
+        st.markdown("#### 关键证据")
+        for item in (display.get("curated_evidence") or [])[:8]:
+            _card(
+                item.get("metric_name") or item.get("id") or "evidence",
+                (
+                    f"{item.get('metric_value', item.get('value', '待补证'))}｜{item.get('period') or '未注明期间'}\n"
+                    f"来源质量：{humanize_tier(item.get('tier'))}｜来源类型：{humanize_source_type(item.get('source_type'))}\n"
+                    f"{sanitize_display_text(item.get('quote', ''))}\n"
+                    f"URL：{item.get('url') or '无'}"
+                ),
+                [_badge(humanize_tier(item.get("tier", "content")), "fact")],
+            )
+    with third_row[1]:
+        recommendation = display.get("recommendation_text", {})
+        _card(
+            "给用户的研究建议",
+            (
+                f"1. 当前能确认什么\n{sanitize_display_text(recommendation.get('what_we_know', '暂无'))}\n\n"
+                f"2. 当前不能确认什么\n{sanitize_display_text(recommendation.get('what_we_do_not_know', '暂无'))}\n\n"
+                f"3. 为什么现在不直接给投资判断\n{sanitize_display_text(recommendation.get('why_this_verdict', '暂无'))}\n\n"
+                f"4. 下一步研究路线\n{sanitize_display_text(recommendation.get('next_research_plan', '暂无'))}"
+            ),
+            [_badge("建议", "medium")],
+        )
+
+    if memo:
+        with st.expander("展开查看研究备忘录", expanded=False):
+            snapshot_rows = memo.get("snapshot_dashboard") or []
+            if snapshot_rows:
+                st.table(snapshot_rows)
+            _card(
+                "财务质量补充",
+                sanitize_display_text(memo.get("financial_quality", {}).get("summary", "暂无财务质量摘要。")),
+                [_badge("财务", "fact")],
+            )
+            cash_flow_bridge = memo.get("cash_flow_bridge", {})
+            _card(
+                "现金流桥",
+                sanitize_display_text(cash_flow_bridge.get("commentary", "暂无现金流桥结论。")),
+                [_badge(sanitize_display_text(cash_flow_bridge.get("status", "仍需补证")), "medium")],
+            )
+            if cash_flow_bridge.get("rows"):
+                st.table(cash_flow_bridge["rows"])
+            valuation = memo.get("valuation", {})
+            absolute = valuation.get("absolute", {})
+            _card(
+                "估值",
+                sanitize_display_text(absolute.get("summary", absolute.get("assessment", "暂无估值结论。"))),
+                [_badge(sanitize_display_text(absolute.get("assessment", "仍需补证")), "medium")],
+            )
+            if absolute.get("rows"):
+                st.table(absolute["rows"])
+            peers = valuation.get("relative_peers", {}).get("rows", [])
+            if peers:
+                st.markdown("**同行对比**")
+                st.table(peers)
+            _card(
+                "市场定价叙事",
+                sanitize_display_text(valuation.get("market_implied_narrative", "暂无市场定价叙事。")),
+                [_badge("叙事", "fact")],
+            )
+            rerating = "\n".join(f"- {sanitize_display_text(item)}" for item in valuation.get("rerating_triggers", [])[:4]) or "暂无。"
+            _card("关注触发条件", rerating, [_badge("触发条件", "medium")])
+            competition = memo.get("competition", {})
+            if competition.get("framework"):
+                st.table(competition["framework"])
+            _card(
+                "竞争位置",
+                sanitize_display_text(competition.get("summary", "暂无竞争位置结论。")),
+                [_badge("竞争", "fact")],
+            )
+            changes = memo.get("what_changes_my_mind", {})
+            gaps_text = "\n".join(f"- {sanitize_display_text(item)}" for item in memo.get("evidence_gaps", [])[:6]) or "暂无。"
+            plan_text = "\n".join(
+                f"- {sanitize_display_text(item.get('action', ''))}：{sanitize_display_text(item.get('why', ''))}"
+                for item in memo.get("next_research_actions", [])[:3]
+            ) or "暂无。"
+            cols = st.columns(2)
+            with cols[0]:
+                _card(
+                    "什么情况会改变判断",
+                    (
+                        "上调研究优先级的触发条件\n"
+                        + ("\n".join(f"- {sanitize_display_text(item)}" for item in changes.get("upgrade_triggers", [])[:4]) or "- 暂无。")
+                        + "\n\n下调研究优先级的触发条件\n"
+                        + ("\n".join(f"- {sanitize_display_text(item)}" for item in changes.get("downgrade_triggers", [])[:4]) or "- 暂无。")
+                    ),
+                    [_badge("触发条件", "medium")],
+                )
+            with cols[1]:
+                _card("关键缺口", gaps_text, [_badge("缺口", "medium")])
+                _card("下一步补证动作", plan_text, [_badge("下一步", "medium")])
+
+    with st.expander("开发者模式", expanded=False):
+        st.json(display.get("developer_payload", {}))
+
+
 def run_research(query: str) -> dict:
-    progress = st.progress(0)
-    progress_steps = {
-        "define": 8,
-        "decompose": 16,
-        "financial_snapshot": 24,
-        "retrieve": 35,
-        "extract": 48,
-        "variable": 58,
-        "reason": 68,
-        "action": 76,
-        "auto_research": 84,
-        "investment": 90,
-        "roles": 95,
-        "report": 100,
-        "early_stop": 100,
-    }
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    detail_text = st.empty()
+
+    def _render_progress(progress_payload: dict[str, object]) -> None:
+        st.session_state["progress"] = progress_payload
+        current_step = str(progress_payload.get("current_step") or "")
+        step_progress = int(progress_payload.get("step_progress") or 0)
+        step_total = int(progress_payload.get("step_total") or 0)
+        overall_progress = float(progress_payload.get("overall_progress") or 0.0)
+        message = str(progress_payload.get("message") or "")
+
+        if step_total > 0:
+            status_text.text(f"{current_step}（{step_progress} / {step_total}）")
+        else:
+            status_text.text(current_step or "正在执行研究流程")
+
+        detail_text.caption(message)
+        progress_bar.progress(max(0, min(100, int(round(overall_progress * 100)))))
 
     def _live_progress(step: str, message: str, payload) -> None:
-        progress.progress(progress_steps.get(step, 5))
-        st.write(f"✓ {message}")
-        if step == "define" and payload is not None:
-            st.write(
-                "研究对象："
-                f"{payload.entity or '未识别'}｜对象类型：{getattr(payload, 'research_object_type', 'unknown')}"
-                f"｜上市状态：{getattr(payload, 'listing_status', 'unknown')}"
-            )
-        elif step == "financial_snapshot" and payload is not None:
-            st.write(f"Provider：{payload.provider}｜Symbol：{payload.symbol or '未解析'}｜Status：{payload.status}")
-        elif step == "retrieve" and payload is not None:
-            st.write(f"来源数量：{len(payload)}")
-        elif step == "extract" and payload is not None:
-            st.write(f"证据数量：{len(payload)}")
+        if isinstance(payload, dict):
+            _render_progress(payload)
 
     with st.status("正在执行研究流程...", expanded=True) as status:
         result = research_pipeline(query, progress_callback=_live_progress)
         status.update(label="研究流程执行完成", state="complete", expanded=False)
 
-    topic = result["topic"]
-    questions = result["questions"]
-    sources = result["sources"]
-    evidence = result["evidence"]
-    variables = result["variables"]
-    roles = result["roles"]
-    judgment = result["judgment"]
-    auto_research_trace = result.get("auto_research_trace", [])
-    executive_summary = result.get("executive_summary")
-    financial_snapshot = result.get("financial_snapshot")
-    early_stop_reason = result.get("early_stop_reason")
-    report = result["report"]
+    tracker = result.get("progress")
+    if tracker is not None and hasattr(tracker, "as_dict"):
+        _render_progress(tracker.as_dict())
+    else:
+        progress_bar.progress(100)
 
-    render_default_brief(result)
-    render_confidence_guidance()
+    early_stop_reason = result.get("early_stop_reason")
+
+    render_cockpit(result)
     if early_stop_reason:
         st.warning(f"早停原因：{early_stop_reason}")
-
-    layer_tabs = st.tabs(["Layer 1｜默认结论", "Layer 2｜关键证据与风险", "Layer 3｜完整研究报告"])
-    with layer_tabs[0]:
-        render_executive_summary(executive_summary)
-        _render_step_title(1, "明确研究对象", "识别研究对象、研究主题、目标和类型。")
-        render_topic(topic)
-        _render_step_title(10, "投资层处理建议", "系统正式输出的研究流程处理建议。")
-        render_investment(judgment)
-
-    with layer_tabs[1]:
-        _render_step_title(2, "结构化金融快照", "公司类研究会调用真实结构化金融数据接口，用作初筛辅助，不替代官方财报。")
-        render_financial_snapshot(financial_snapshot)
-        _render_step_title(5, "提取有效证据", "默认只看证据表；需要时展开单条证据。")
-        render_evidence(evidence, sources)
-        _render_step_title(6, "关键投研变量", "把底层 evidence 翻译成更接近用户语言的变量。")
-        render_variables(variables)
-        _render_step_title(7, "综合研究判断", "展示结论、风险、缺口、置信度和压力测试。")
-        render_judgment(judgment, evidence)
-        _render_step_title(8, "下一步研究动作", "根据证据缺口和风险，生成可执行补证动作。")
-        render_actions(judgment)
-        _render_step_title(11, "多角色投研团队", "对第十步建议做组织化复核与补充视角。")
-        render_roles(roles)
-
-    with layer_tabs[2]:
-        _render_step_title(3, "拆解研究框架", "把模糊问题拆成财务、现金流、行业、治理、风险等子问题。")
-        render_questions(questions)
-        _render_step_title(4, "多视角真实检索", "事实流、风险流、反证流分别检索；优先寻找官方公告、IR、交易所与专业财经来源。")
-        render_sources(sources)
-        _render_step_title(9, "自动补证记录", "如果初步判断低置信度，系统会按结构化 action 有限补证。")
-        render_auto_research(auto_research_trace)
-        _render_step_title(12, "可验证研究报告", "最终报告保留证据引用、来源 URL 和不确定性。")
-        st.markdown(report.markdown)
-        st.download_button(
-            "下载 Markdown 报告",
-            data=report.markdown,
-            file_name=f"{topic.topic}_research_report.md",
-            mime="text/markdown",
-        )
-    progress.progress(100)
 
     return result
 
@@ -1114,7 +1252,7 @@ def main() -> None:
         st.write("3. 最后打开 Layer 3：完整来源、自动补证和报告。")
         st.warning("定位：研究初筛工具，不是荐股工具。")
 
-    default_query = "研究宁德时代是否值得进一步研究"
+    default_query = "我想买阿里巴巴的股票，你觉得我是是否值得进一步研究"
     input_cols = st.columns([4, 1])
     with input_cols[0]:
         query = st.text_input(

@@ -18,8 +18,10 @@ from app.models.judgment import (
     RiskItem,
 )
 from app.models.question import Question
+from app.models.source import Source
 from app.models.topic import Topic
 from app.models.variable import ResearchVariable
+from app.services.evidence_registry import build_evidence_registry
 from app.services.llm_service import call_llm
 
 _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
@@ -54,7 +56,26 @@ def _collect_theme_hits(evidence: list[Evidence]) -> Counter[str]:
     return hits
 
 
-def _validate_evidence_ids(referenced_ids: list[str], evidence_map: dict[str, Evidence]) -> list[str]:
+def _record_broken_refs(debug_observability: dict[str, object] | None, location: str | None, dropped: int) -> None:
+    if not debug_observability or dropped <= 0:
+        return
+    debug_observability["BROKEN_EVIDENCE_REF_DROPPED"] = int(debug_observability.get("BROKEN_EVIDENCE_REF_DROPPED", 0)) + dropped
+    locations = {
+        item
+        for item in str(debug_observability.get("BROKEN_EVIDENCE_REF_LOCATIONS", "")).split("|")
+        if item
+    }
+    if location:
+        locations.add(location)
+    debug_observability["BROKEN_EVIDENCE_REF_LOCATIONS"] = "|".join(sorted(locations))
+
+
+def _validate_evidence_ids(
+    referenced_ids: list[str],
+    evidence_map: dict[str, Evidence],
+    location: str | None = None,
+    debug_observability: dict[str, object] | None = None,
+) -> list[str]:
     valid_ids = [
         evidence_id
         for evidence_id in referenced_ids
@@ -70,6 +91,7 @@ def _validate_evidence_ids(referenced_ids: list[str], evidence_map: dict[str, Ev
         if evidence_id not in seen:
             deduped.append(evidence_id)
             seen.add(evidence_id)
+    _record_broken_refs(debug_observability, location, len(referenced_ids) - len(deduped))
     return deduped
 
 
@@ -114,7 +136,7 @@ def _judgment_debug_stats(raw_evidence: list[Evidence], allowed_evidence: list[E
 def _blocked_evidence_pressure_tests(raw_evidence: list[Evidence], allowed_evidence: list[Evidence]) -> list[PressureTest]:
     if allowed_evidence:
         return []
-    weak_ids = [item.id for item in raw_evidence if item.source_tier == "content"][:5]
+    weak_ids = [item.id for item in raw_evidence if (item.source_tier or "content") == "content"][:5]
     if not weak_ids:
         return []
     return [
@@ -279,6 +301,7 @@ def _parse_llm_reasoning(
     evidence_gaps: list[EvidenceGap],
     evidence_map: dict[str, Evidence],
     variables: list[ResearchVariable] | None = None,
+    debug_observability: dict[str, object] | None = None,
 ) -> Judgment | None:
     evidence_json = json.dumps(
         [
@@ -329,20 +352,20 @@ def _parse_llm_reasoning(
     clusters = [
         EvidenceCluster(
             theme=item["theme"],
-            support_evidence_ids=_validate_evidence_ids(item.get("support_evidence_ids", []), evidence_map),
-            counter_evidence_ids=_validate_evidence_ids(item.get("counter_evidence_ids", []), evidence_map),
+            support_evidence_ids=_validate_evidence_ids(item.get("support_evidence_ids", []), evidence_map, "llm_cluster_support", debug_observability),
+            counter_evidence_ids=_validate_evidence_ids(item.get("counter_evidence_ids", []), evidence_map, "llm_cluster_counter", debug_observability),
         )
         for item in payload.get("clusters", [])
         if item.get("theme")
     ]
-    conclusion_evidence_ids = _validate_evidence_ids(payload.get("conclusion_evidence_ids", []), evidence_map)
+    conclusion_evidence_ids = _validate_evidence_ids(payload.get("conclusion_evidence_ids", []), evidence_map, "llm_conclusion", debug_observability)
     risk = [
         RiskItem(
             text=item["text"],
-            evidence_ids=_validate_evidence_ids(item.get("evidence_ids", []), evidence_map),
+            evidence_ids=_validate_evidence_ids(item.get("evidence_ids", []), evidence_map, "llm_risk", debug_observability),
         )
         for item in payload.get("risk", [])
-        if item.get("text") and _validate_evidence_ids(item.get("evidence_ids", []), evidence_map)
+        if item.get("text") and _validate_evidence_ids(item.get("evidence_ids", []), evidence_map, "llm_risk_presence", debug_observability)
     ]
     confidence = payload.get("confidence", "low")
     if confidence not in {"low", "medium", "high"}:
@@ -469,31 +492,8 @@ def _build_conclusion(
 
 
 def _calculate_confidence(evidence: list[Evidence], clusters: list[EvidenceCluster]) -> str:
-    if len(evidence) < 2:
-        return "low"
-
-    source_count = len({item.source_id for item in evidence})
-    if source_count <= 1:
-        # Single-source evidence can easily overstate certainty.
-        return "low"
-
-    grounded_ratio = len([item for item in evidence if item.grounded]) / max(len(evidence), 1)
-    if grounded_ratio < 0.8:
-        return "low"
-
-    support_clusters = [cluster for cluster in clusters if cluster.support_evidence_ids]
-    conflict_clusters = [cluster for cluster in support_clusters if cluster.counter_evidence_ids]
-    if source_count >= 3 and support_clusters and not conflict_clusters:
-        confidence = "medium"
-    elif support_clusters:
-        confidence = "low"
-    else:
-        confidence = "low"
-
-    if conflict_clusters and confidence != "low":
-        confidence = "low"
-
-    return confidence
+    del evidence, clusters
+    return "low"
 
 
 def _calculate_confidence_with_questions(
@@ -501,18 +501,8 @@ def _calculate_confidence_with_questions(
     clusters: list[EvidenceCluster],
     questions: list[Question],
 ) -> str:
-    confidence = _calculate_confidence(evidence, clusters)
-    if not questions:
-        return confidence
-
-    covered_question_ids = {item.question_id for item in evidence if item.question_id}
-    coverage_ratio = len(covered_question_ids) / len(questions)
-
-    if coverage_ratio < 0.5:
-        return "low"
-    if coverage_ratio < 0.8 and confidence == "high":
-        return "medium"
-    return confidence
+    del evidence, clusters, questions
+    return "low"
 
 
 def _min_confidence(left: str, right: str) -> str:
@@ -581,11 +571,101 @@ def _gap_level(evidence_gaps: list[EvidenceGap]) -> str:
     return "low"
 
 
+def _structured_metric_evidence(items: list[Evidence]) -> list[Evidence]:
+    return [
+        item
+        for item in items
+        if (
+            item.metric_name
+            or (
+                item.evidence_type == "data"
+                and item.source_tier in {"official", "professional"}
+                and (item.evidence_score or item.quality_score or 0) >= 0.7
+            )
+        )
+        and item.evidence_type == "data"
+        and item.can_enter_main_chain
+        and not item.is_noise
+        and not item.is_truncated
+        and not item.cross_entity_contamination
+    ]
+
+
+def _source_quality_score(evidence: list[Evidence]) -> int:
+    official_sources = {item.source_id for item in evidence if item.source_tier == "official"}
+    professional_sources = {item.source_id for item in evidence if item.source_tier == "professional"}
+    if len(official_sources) >= 2:
+        return 2
+    if official_sources or len(professional_sources) >= 2:
+        return 1
+    return 0
+
+
+def _evidence_quality_score(evidence: list[Evidence]) -> int:
+    metric_count = len(_structured_metric_evidence(evidence))
+    if metric_count >= 6:
+        return 2
+    if metric_count >= 3:
+        return 1
+    return 0
+
+
+def _coverage_score(questions: list[Question], evidence: list[Evidence]) -> int:
+    covered_frameworks = {
+        item.framework_type
+        for item in questions
+        if item.framework_type in {"financial", "valuation", "industry", "credit"}
+        and item.coverage_level in {"partial", "covered"}
+    }
+    if len(covered_frameworks) >= 2:
+        return 2
+    if len(covered_frameworks) == 1:
+        return 1
+    covered_question_ids = {item.question_id for item in evidence if item.question_id}
+    generic_covered = len([question for question in questions if question.id in covered_question_ids])
+    if generic_covered >= 2:
+        return 2
+    if generic_covered == 1:
+        return 1
+    return 0
+
+
+def _conflict_penalty(conflict_level: str) -> int:
+    return -1 if conflict_level == "strong" else 0
+
+
+def _critical_gap_penalty(topic: Topic | None, questions: list[Question], evidence: list[Evidence]) -> int:
+    valuation_uncovered = any(
+        item.framework_type == "valuation" and item.coverage_level == "uncovered"
+        for item in questions
+    )
+    metric_names = {str(item.metric_name).lower() for item in _structured_metric_evidence(evidence) if item.metric_name}
+    joined = " ".join(item.content for item in evidence)
+    missing_core_business = (
+        topic is not None
+        and (topic.type == "company" or getattr(topic, "research_object_type", "unknown") == "listed_company")
+        and not (
+            any(metric in metric_names for metric in {"revenue", "revenue_growth", "segment_revenue", "customer_management_revenue", "cmr"})
+            or any(token in joined for token in ["营业收入", "营收", "revenue", "市场份额", "market share", "云收入", "cloud revenue"])
+        )
+    )
+    return -1 if valuation_uncovered or missing_core_business else 0
+
+
+def _confidence_from_score(score: int) -> str:
+    if score >= 5:
+        return "high"
+    if score >= 3:
+        return "medium"
+    return "low"
+
+
 def _build_confidence_basis(
     evidence: list[Evidence],
     clusters: list[EvidenceCluster],
     evidence_gaps: list[EvidenceGap],
     topic: Topic | None = None,
+    questions: list[Question] | None = None,
 ) -> ConfidenceBasis:
     source_count = len({item.source_id for item in evidence})
     if source_count <= 1:
@@ -610,6 +690,12 @@ def _build_confidence_basis(
     weak_source_only = bool(evidence) and not has_professional_or_official
     if topic is not None and (topic.type == "company" or topic.entity) and not has_official_source:
         weak_source_only = True
+    source_quality_score = _source_quality_score(evidence)
+    evidence_quality_score = _evidence_quality_score(evidence)
+    coverage_score = _coverage_score(questions or [], evidence)
+    conflict_penalty = _conflict_penalty(conflict_level)
+    critical_gap_penalty = _critical_gap_penalty(topic, questions or [], evidence)
+    confidence_score = source_quality_score + evidence_quality_score + coverage_score + conflict_penalty + critical_gap_penalty
 
     return ConfidenceBasis(
         source_count=source_count,
@@ -620,26 +706,18 @@ def _build_confidence_basis(
         has_official_source=has_official_source,
         official_evidence_count=official_evidence_count,
         weak_source_only=weak_source_only,
+        confidence_score=confidence_score,
+        source_quality_score=source_quality_score,
+        evidence_quality_score=evidence_quality_score,
+        coverage_score=coverage_score,
+        conflict_penalty=conflict_penalty,
+        critical_gap_penalty=critical_gap_penalty,
     )
 
 
 def _apply_confidence_basis(base_confidence: str, confidence_basis: ConfidenceBasis) -> str:
-    confidence = base_confidence
-    if confidence_basis.source_diversity == "low":
-        confidence = _min_confidence(confidence, "low")
-    if confidence_basis.effective_evidence_count < 3:
-        confidence = _min_confidence(confidence, "low")
-    if confidence_basis.weak_source_only:
-        confidence = _min_confidence(confidence, "low")
-    if confidence_basis.conflict_level == "strong":
-        confidence = _min_confidence(confidence, "low")
-    elif confidence_basis.conflict_level == "partial":
-        confidence = _min_confidence(confidence, "medium")
-    if confidence_basis.evidence_gap_level == "high":
-        confidence = _min_confidence(confidence, "medium")
-    elif confidence_basis.evidence_gap_level == "medium":
-        confidence = _min_confidence(confidence, "medium")
-    return confidence
+    del base_confidence
+    return _confidence_from_score(confidence_basis.confidence_score)
 
 
 def _calculate_confidence_layers(
@@ -647,16 +725,16 @@ def _calculate_confidence_layers(
     evidence: list[Evidence],
     clusters: list[EvidenceCluster],
 ) -> tuple[str, str, str]:
-    if confidence_basis.source_diversity == "high" and confidence_basis.has_official_source:
+    if confidence_basis.source_quality_score >= 2:
         source_confidence = "high"
-    elif confidence_basis.source_diversity in {"medium", "high"} and not confidence_basis.weak_source_only:
+    elif confidence_basis.source_quality_score >= 1:
         source_confidence = "medium"
     else:
         source_confidence = "low"
 
-    if confidence_basis.evidence_gap_level == "low" and confidence_basis.effective_evidence_count >= 6:
+    if confidence_basis.evidence_quality_score >= 2 and confidence_basis.coverage_score >= 2:
         research_confidence = "high"
-    elif confidence_basis.evidence_gap_level != "high" and confidence_basis.effective_evidence_count >= 3:
+    elif confidence_basis.evidence_quality_score >= 1:
         research_confidence = "medium"
     else:
         research_confidence = "low"
@@ -665,7 +743,7 @@ def _calculate_confidence_layers(
     if (
         len(support_clusters) >= 3
         and confidence_basis.conflict_level == "none"
-        and confidence_basis.effective_evidence_count >= 5
+        and confidence_basis.evidence_quality_score >= 2
     ):
         signal_confidence = "high"
     elif support_clusters and confidence_basis.conflict_level != "strong" and len(evidence) >= 3:
@@ -764,6 +842,7 @@ def _is_high_quality_conclusion_evidence(item: Evidence) -> bool:
         and item.evidence_type == "data"
         and not item.is_noise
         and not item.is_truncated
+        and "estimate" not in (item.quality_notes or [])
         and (item.evidence_score or item.quality_score or 0) >= 0.35
     )
 
@@ -803,11 +882,22 @@ def _sanitize_strong_conclusion(conclusion: str, evidence_gaps: list[EvidenceGap
 
 def _build_judgment_layers(
     conclusion: str,
+    topic: Topic,
+    confidence: str,
     conclusion_ids: list[str],
     evidence_map: dict[str, Evidence],
     evidence_gaps: list[EvidenceGap],
 ) -> tuple[str, list[str], list[str], list[str]]:
     conclusion, downgrade_notes = _sanitize_strong_conclusion(conclusion, evidence_gaps)
+    if confidence == "low":
+        if topic.type == "compliance":
+            conclusion = "当前存在合规风险线索，但关键监管口径和资质边界仍待验证。"
+        elif topic.type == "company" or "投资" in topic.query or "值得进一步研究" in topic.query:
+            conclusion = "当前仅有初步线索，但关键前提仍待验证，建议先列入观察清单并继续补证。"
+        else:
+            return conclusion, _build_verified_facts(conclusion_ids, evidence_map)[:5], [], list(dict.fromkeys(downgrade_notes + _period_scope_notes(list(evidence_map.values())) + [gap.text for gap in evidence_gaps[:3]]))[:6]
+    elif confidence == "medium" and any(token in conclusion for token in _STRONG_JUDGMENT_TOKENS):
+        conclusion = "当前证据支持继续标准研究，但估值、持续性与竞争强度仍需进一步验证。"
     verified_facts = _build_verified_facts(conclusion_ids, evidence_map)
     pending_assumptions = downgrade_notes + _period_scope_notes(list(evidence_map.values()))
     pending_assumptions.extend(gap.text for gap in evidence_gaps[:3])
@@ -820,6 +910,29 @@ def _build_judgment_layers(
         probable_inferences[:3],
         list(dict.fromkeys(pending_assumptions))[:6],
     )
+
+
+def _apply_pressure_conclusion_guardrails(
+    topic: Topic,
+    conclusion: str,
+    confidence_basis: ConfidenceBasis,
+    pressure_tests: list[PressureTest],
+) -> str:
+    has_logic_gap = any(item.attack_type == "logic_gap" and item.severity == "high" for item in pressure_tests)
+    has_counter_conflict = any(
+        item.attack_type == "ignored_counter_evidence" and item.severity in {"medium", "high"}
+        for item in pressure_tests
+    )
+    has_high_priority_gap = confidence_basis.evidence_gap_level == "high"
+
+    if has_logic_gap:
+        conclusion = "当前存在逻辑跳跃，主结论已降级为观察清单和继续补证。"
+    elif has_high_priority_gap and (topic.type == "company" or "投资" in topic.query or "值得进一步研究" in topic.query):
+        conclusion = "当前存在高优先级证据缺口，主结论仅保留为观察清单和继续研究。"
+
+    if has_counter_conflict and "证据冲突" not in conclusion and "反证尚未被充分吸收" not in conclusion:
+        conclusion = f"{conclusion.rstrip('。')}。当前存在证据冲突，反证尚未被充分吸收。"
+    return conclusion
 
 
 def _build_catalysts(topic: Topic, evidence: list[Evidence], evidence_map: dict[str, Evidence]) -> list[Catalyst]:
@@ -934,19 +1047,19 @@ def _validate_judgment(
 ) -> Judgment:
     """Ensure all judgment references point to real evidence ids."""
 
-    conclusion_ids = _validate_evidence_ids(judgment.conclusion_evidence_ids, evidence_map)
+    conclusion_ids = _validate_evidence_ids(judgment.conclusion_evidence_ids, evidence_map, "validated_conclusion", debug_observability)
     clusters = [
         EvidenceCluster(
             theme=cluster.theme,
-            support_evidence_ids=_validate_evidence_ids(cluster.support_evidence_ids, evidence_map),
-            counter_evidence_ids=_validate_evidence_ids(cluster.counter_evidence_ids, evidence_map),
+            support_evidence_ids=_validate_evidence_ids(cluster.support_evidence_ids, evidence_map, "validated_cluster_support", debug_observability),
+            counter_evidence_ids=_validate_evidence_ids(cluster.counter_evidence_ids, evidence_map, "validated_cluster_counter", debug_observability),
         )
         for cluster in judgment.clusters
     ]
     clusters = [cluster for cluster in clusters if cluster.support_evidence_ids or cluster.counter_evidence_ids]
 
     risk = [
-        RiskItem(text=item.text, evidence_ids=_validate_evidence_ids(item.evidence_ids, evidence_map))
+        RiskItem(text=item.text, evidence_ids=_validate_evidence_ids(item.evidence_ids, evidence_map, "validated_risk", debug_observability))
         for item in judgment.risk
     ]
     risk = [item for item in risk if item.evidence_ids]
@@ -968,8 +1081,6 @@ def _validate_judgment(
         for item in pressure_tests
     ):
         confidence = _min_confidence(confidence, "medium")
-    if confidence == "high":
-        confidence = "medium"
     research_confidence, signal_confidence, source_confidence = _calculate_confidence_layers(
         confidence_basis,
         list(evidence_map.values()),
@@ -978,8 +1089,11 @@ def _validate_judgment(
     bear_theses = _build_bear_theses(topic, judgment, evidence_map, pressure_tests)
     catalysts = _build_catalysts(topic, list(evidence_map.values()), evidence_map)
     positioning = _build_positioning(topic, confidence, confidence_basis, pressure_tests)
+    conclusion = _apply_pressure_conclusion_guardrails(topic, conclusion, confidence_basis, pressure_tests)
     conclusion, verified_facts, probable_inferences, pending_assumptions = _build_judgment_layers(
         conclusion,
+        topic,
+        confidence,
         conclusion_ids,
         evidence_map,
         judgment.evidence_gaps,
@@ -1263,12 +1377,21 @@ def reason_and_generate(
     evidence: list[Evidence],
     questions: list[Question],
     variables: list[ResearchVariable] | None = None,
+    sources: list[Source] | None = None,
 ) -> Judgment:
     """Generate a bounded judgment based on extracted evidence."""
 
     raw_evidence = list(evidence)
-    evidence = _main_chain_evidence(raw_evidence, topic)
-    debug_observability = _judgment_debug_stats(raw_evidence, evidence)
+    registry = build_evidence_registry(raw_evidence, topic=topic, sources=sources)
+    evidence = _main_chain_evidence(registry.evidence, topic)
+    debug_observability = {
+        **_judgment_debug_stats(raw_evidence, evidence),
+        "EVIDENCE_REGISTRY_TOTAL": registry.total_count,
+        "EVIDENCE_REGISTRY_DISPLAYABLE": registry.displayable_count,
+        **registry.debug_stats,
+        "BROKEN_EVIDENCE_REF_DROPPED": 0,
+        "BROKEN_EVIDENCE_REF_LOCATIONS": "",
+    }
 
     if not evidence:
         judgment = _build_empty_evidence_judgment(topic, questions)
@@ -1284,7 +1407,7 @@ def reason_and_generate(
     verified_variables = _filter_verified_variables(variables, evidence_map)
     evidence_gaps = _build_evidence_gaps(questions, evidence)
     keyword_clusters = _build_keyword_clusters(topic, evidence, evidence_map)
-    llm_judgment = _parse_llm_reasoning(topic, evidence, questions, evidence_gaps, evidence_map, verified_variables)
+    llm_judgment = _parse_llm_reasoning(topic, evidence, questions, evidence_gaps, evidence_map, verified_variables, debug_observability)
 
     if llm_judgment is not None:
         merged_clusters = _merge_clusters(llm_judgment.clusters, keyword_clusters, evidence_map)
@@ -1301,7 +1424,7 @@ def reason_and_generate(
 
         unknown = _merge_unknowns(llm_judgment.unknown, _select_unknowns(topic, evidence, evidence_gaps), limit=3)
         deterministic_confidence = _calculate_confidence_with_questions(evidence, merged_clusters, questions)
-        confidence_basis = _build_confidence_basis(evidence, merged_clusters, evidence_gaps, topic)
+        confidence_basis = _build_confidence_basis(evidence, merged_clusters, evidence_gaps, topic, questions)
         confidence = _apply_confidence_basis(deterministic_confidence, confidence_basis)
         research_actions = _build_research_actions(evidence_gaps, risk, confidence_basis)
 
@@ -1332,7 +1455,7 @@ def reason_and_generate(
             fallback_text = "合规风险待核实" if topic.type == "compliance" else "风险信号仍需继续核实"
             risk = [RiskItem(text=fallback_text, evidence_ids=fallback_ids)]
     unknown = _select_unknowns(topic, evidence, evidence_gaps)
-    confidence_basis = _build_confidence_basis(evidence, keyword_clusters, evidence_gaps, topic)
+    confidence_basis = _build_confidence_basis(evidence, keyword_clusters, evidence_gaps, topic, questions)
     confidence = _apply_confidence_basis(
         _calculate_confidence_with_questions(evidence, keyword_clusters, questions),
         confidence_basis,

@@ -133,7 +133,14 @@ def _sorted_unique_actions(actions: list[ResearchAction]) -> list[ResearchAction
 
 
 def generate_research_actions(judgment: Judgment) -> list[ResearchAction]:
-    """Generate structured research tasks from evidence gaps and risks."""
+    """Generate structured research tasks from evidence gaps and risks.
+
+    NOTE: This generates diagnostic guidance on补证方向 (gap identification),
+    but does NOT automatically execute the补证 loop. The tasks are recommendations
+    for what evidence gaps should be addressed next. Final judgment is based on
+    current evidence only. To implement automatic multi-round补证, wrap this with
+    explicit loop control and budget constraints.
+    """
 
     if judgment.research_actions:
         return _sorted_unique_actions(judgment.research_actions)

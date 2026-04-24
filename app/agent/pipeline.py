@@ -4,6 +4,7 @@ import re
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 
 from app.agent.steps.action import generate_research_actions
 from app.agent.steps.auto_research import auto_research_loop
@@ -24,10 +25,10 @@ from app.models.question import Question
 from app.models.source import Source, SourceTier
 from app.models.topic import Topic
 from app.services.content_fetcher import enrich_sources_content
-from app.services.evidence_engine import rank_sources
+from app.services.evidence_engine import iter_sources_with_progress, rank_sources
 from app.services.financial_data_service import fetch_financial_snapshot
 from app.services.official_source_injector import inject_official_sources
-from app.services.official_document_extractor import official_parse_metrics
+from app.services.llm_evidence_extractor import official_parse_metrics
 from app.services.pdf_service import enrich_pdf_sources
 from app.services.storage_service import (
     save_evidence,
@@ -84,14 +85,73 @@ _CURRENCY_UNIT_LABELS = {
 }
 
 
+class ProgressTracker:
+    def __init__(self) -> None:
+        self.current_step = ""
+        self.step_progress = 0
+        self.step_total = 0
+        self.overall_progress = 0.0
+        self.message = ""
+
+    def update(
+        self,
+        step: str,
+        current: int | None = None,
+        total: int | None = None,
+        progress: float | None = None,
+        message: str | None = None,
+    ) -> None:
+        self.current_step = step
+        if current is not None:
+            self.step_progress = int(current)
+        else:
+            self.step_progress = 0
+        if total is not None:
+            self.step_total = int(total)
+        else:
+            self.step_total = 0
+        if progress is not None:
+            bounded = max(0.0, min(1.0, float(progress)))
+            self.overall_progress = max(self.overall_progress, bounded)
+        if message:
+            self.message = message
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "current_step": self.current_step,
+            "step_progress": self.step_progress,
+            "step_total": self.step_total,
+            "overall_progress": self.overall_progress,
+            "message": self.message,
+        }
+
+
 def _emit_progress(
     callback: ProgressCallback | None,
-    step: str,
-    message: str,
-    payload: object | None = None,
+    tracker: ProgressTracker,
 ) -> None:
     if callback is not None:
-        callback(step, message, payload)
+        callback(tracker.current_step, tracker.message, tracker.as_dict())
+
+
+def _update_progress(
+    tracker: ProgressTracker,
+    callback: ProgressCallback | None,
+    *,
+    step: str,
+    progress: float,
+    message: str,
+    current: int | None = None,
+    total: int | None = None,
+) -> None:
+    tracker.update(
+        step=step,
+        current=current,
+        total=total,
+        progress=progress,
+        message=message,
+    )
+    _emit_progress(callback, tracker)
 
 
 def _financial_snapshot_to_source(
@@ -284,6 +344,48 @@ def _enrich_and_rank_sources(sources: list[Source], topic: Topic) -> list[Source
     return rank_sources(enriched, topic, len(enriched))
 
 
+def _extract_evidence_with_progress(
+    topic: Topic,
+    questions: list[Question],
+    sources: list[Source],
+    tracker: ProgressTracker,
+    progress_callback: ProgressCallback | None,
+) -> list[Evidence]:
+    if not sources:
+        _update_progress(
+            tracker,
+            progress_callback,
+            step="正在解析证据",
+            current=0,
+            total=0,
+            progress=0.7,
+            message="当前没有可解析的来源。",
+        )
+        return []
+
+    evidence: list[Evidence] = []
+    for source, source_progress in iter_sources_with_progress(
+        sources,
+        step="正在解析证据",
+        progress_start=0.3,
+        progress_span=0.4,
+    ):
+        _update_progress(
+            tracker,
+            progress_callback,
+            step=source_progress["step"],
+            current=source_progress["current"],
+            total=source_progress["total"],
+            progress=source_progress["progress"],
+            message=source_progress["message"],
+        )
+        source_evidence = extract_evidence(topic, questions, [source])
+        for item in source_evidence:
+            evidence.append(item.model_copy(update={"id": f"e{len(evidence) + 1}"}))
+
+    return evidence
+
+
 def _attach_peer_comparison_to_judgment(judgment, snapshot: FinancialSnapshot):
     if not snapshot.peer_comparison or judgment.peer_context is None:
         return judgment
@@ -317,7 +419,13 @@ def _effective_evidence_count(evidence: list) -> int:
 def _log_official_evidence_metrics(sources: list[Source], evidence: list[Evidence], judgment=None) -> None:
     metrics = official_parse_metrics(sources, evidence)
     official_structured_ids = {
-        item.id for item in evidence if "official_structured_financial" in (item.quality_notes or [])
+        item.id
+        for item in evidence
+        if "official_structured_financial" in (item.quality_notes or [])
+        or (
+            "llm_structured_candidate" in (item.quality_notes or [])
+            and item.source_tier in {"official", "professional"}
+        )
     }
     used_ids: set[str] = set()
     if judgment is not None:
@@ -349,7 +457,9 @@ def _pipeline_debug_observability(
     official_evidence = [
         item
         for item in evidence
-        if item.source_tier == "official" or "official_structured_financial" in (item.quality_notes or [])
+        if item.source_tier == "official"
+        or "official_structured_financial" in (item.quality_notes or [])
+        or "llm_structured_candidate" in (item.quality_notes or [])
     ]
     variable_input_ids = {item.id for item in evidence}
     variable_accepted_ids = {evidence_id for variable in variables for evidence_id in variable.evidence_ids}
@@ -468,7 +578,10 @@ def _mark_question_coverage(
             metric_name = getattr(item, "metric_name", None)
             notes = getattr(item, "quality_notes", []) or []
             if source_tier in {"official", "professional"} and (
-                metric_name or "official_structured_financial" in notes or "structured_financial_snapshot" in notes
+                metric_name
+                or "official_structured_financial" in notes
+                or "llm_structured_candidate" in notes
+                or "structured_financial_snapshot" in notes
             ):
                 return True
         return False
@@ -547,37 +660,109 @@ def research_pipeline(
         raise ValueError("query must not be empty")
 
     repo = repository or InMemoryResearchRepository()
+    tracker = ProgressTracker()
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在启动流程",
+        progress=0.02,
+        message="研究流程已启动。",
+    )
 
     topic = define_problem(clean_query)
     listing_text = f"；上市状态：{topic.listing_status}" if topic.listing_status != "unknown" else ""
-    _emit_progress(progress_callback, "define", f"研究主题：{topic.topic}；对象：{topic.entity or '未识别'}{listing_text}", topic)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在明确研究对象",
+        progress=0.08,
+        message=f"研究主题：{topic.topic}；对象：{topic.entity or '未识别'}{listing_text}",
+    )
     questions = decompose_problem(topic)
-    _emit_progress(progress_callback, "decompose", f"已生成 {len(questions)} 个研究问题。", questions)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在生成研究问题",
+        progress=0.16,
+        message=f"已生成 {len(questions)} 个研究问题。",
+    )
     financial_snapshot = fetch_financial_snapshot(topic)
-    _emit_progress(progress_callback, "financial_snapshot", f"金融快照状态：{financial_snapshot.status}", financial_snapshot)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在获取金融快照",
+        progress=0.24,
+        message=f"金融快照状态：{financial_snapshot.status}",
+    )
     official_sources = inject_official_sources(topic, questions)
     retrieved_sources = retrieve_information(questions, topic)
     sources = _dedupe_sources([*official_sources, *retrieved_sources])
     sources = _append_financial_source(sources, financial_snapshot, topic, questions)
     sources = _enrich_and_rank_sources(sources, topic)
-    _emit_progress(progress_callback, "retrieve", f"已获得 {len(sources)} 个来源。", sources)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在获取来源",
+        progress=0.30,
+        message=f"已获得 {len(sources)} 个来源。",
+    )
     snapshot_has_data = financial_snapshot.status in FINANCIAL_SOURCE_STATUSES and bool(financial_snapshot.metrics)
     if len(sources) == 0 and not snapshot_has_data:
         early_stop_reason = "未获得有效来源且金融快照不可用，当前检索结果不足以支撑本次研究。"
         evidence = []
         variables = []
         questions = _mark_question_coverage(questions, evidence, topic, financial_snapshot)
-        judgment = reason_and_generate(topic, evidence, questions, variables)
+        judgment = reason_and_generate(topic, evidence, questions, variables, sources)
+        _update_progress(
+            tracker,
+            progress_callback,
+            step="正在生成结论",
+            progress=0.82,
+            message=f"已生成低置信度结论：{judgment.conclusion}",
+        )
         actions = generate_research_actions(judgment)
         judgment = judgment.model_copy(update={"research_actions": actions})
+        _update_progress(
+            tracker,
+            progress_callback,
+            step="正在规划补证动作",
+            progress=0.87,
+            message=f"已生成 {len(actions)} 个补证任务。",
+        )
         judgment = apply_investment_layer(topic, questions, evidence, judgment, variables)
         judgment = _attach_peer_comparison_to_judgment(judgment, financial_snapshot)
         judgment = _attach_pipeline_debug(judgment, sources, evidence, variables)
+        _update_progress(
+            tracker,
+            progress_callback,
+            step="正在生成研究建议",
+            progress=0.95,
+            message="已生成研究流程层面的处理建议。",
+        )
         roles = synthesize_role_outputs(topic, sources, evidence, variables, judgment)
-        report = generate_report(topic, questions, sources, evidence, variables, roles, judgment)
+        _update_progress(
+            tracker,
+            progress_callback,
+            step="正在生成角色复核",
+            progress=0.98,
+            message=f"已生成 {len(roles)} 个角色视角。",
+        )
+        report = generate_report(topic, questions, sources, evidence, variables, roles, judgment, financial_snapshot)
         executive_summary = build_executive_summary(judgment, early_stop_reason)
-        _emit_progress(progress_callback, "early_stop", early_stop_reason, judgment)
-        _emit_progress(progress_callback, "report", "已生成早停报告。", report)
+        _update_progress(
+            tracker,
+            progress_callback,
+            step="研究流程提前结束",
+            progress=0.99,
+            message=early_stop_reason,
+        )
+        _update_progress(
+            tracker,
+            progress_callback,
+            step="正在生成最终报告",
+            progress=1.0,
+            message="已生成早停报告。",
+        )
         save_topic(repo, topic)
         save_questions(repo, questions)
         save_sources(repo, sources)
@@ -599,22 +784,56 @@ def research_pipeline(
             "financial_snapshot": financial_snapshot,
             "early_stop_reason": early_stop_reason,
             "report": report,
+            "dashboard_view": report.report_display,
+            "progress": tracker,
         }
-    evidence = extract_evidence(topic, questions, sources)
+    evidence = _extract_evidence_with_progress(topic, questions, sources, tracker, progress_callback)
     evidence = [*evidence, *_snapshot_to_evidence(financial_snapshot, topic, questions, sources, evidence)]
     _log_official_evidence_metrics(sources, evidence)
-    _emit_progress(progress_callback, "extract", f"已提取 {len(evidence)} 条证据。", evidence)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在解析证据",
+        current=len(sources),
+        total=len(sources),
+        progress=0.7,
+        message=f"已提取 {len(evidence)} 条证据。",
+    )
     variables = normalize_variables(evidence)
-    _emit_progress(progress_callback, "variable", f"已形成 {len(variables)} 个关键变量。", variables)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在形成关键变量",
+        progress=0.76,
+        message=f"已形成 {len(variables)} 个关键变量。",
+    )
     questions = _mark_question_coverage(questions, evidence, topic, financial_snapshot)
-    judgment = reason_and_generate(topic, evidence, questions, variables)
+    judgment = reason_and_generate(topic, evidence, questions, variables, sources)
     _log_official_evidence_metrics(sources, evidence, judgment)
-    _emit_progress(progress_callback, "reason", f"初步判断：{judgment.conclusion}", judgment)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在生成结论",
+        progress=0.82,
+        message=f"初步判断：{judgment.conclusion}",
+    )
     actions = generate_research_actions(judgment)
     judgment = judgment.model_copy(update={"research_actions": actions})
-    _emit_progress(progress_callback, "action", f"已生成 {len(actions)} 个补证任务。", actions)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在规划补证动作",
+        progress=0.87,
+        message=f"已生成 {len(actions)} 个补证任务。",
+    )
     auto_result = auto_research_loop(topic, questions, sources, evidence, variables, judgment, actions)
-    _emit_progress(progress_callback, "auto_research", f"自动补证轮次：{len(auto_result.trace)}。", auto_result.trace)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在执行自动补证",
+        progress=0.92,
+        message=f"自动补证轮次：{len(auto_result.trace)}。",
+    )
     sources = auto_result.sources
     evidence = auto_result.evidence
     variables = auto_result.variables
@@ -624,7 +843,13 @@ def research_pipeline(
     judgment = _attach_peer_comparison_to_judgment(judgment, financial_snapshot)
     judgment = _attach_pipeline_debug(judgment, sources, evidence, variables)
     _log_official_evidence_metrics(sources, evidence, judgment)
-    _emit_progress(progress_callback, "investment", "已生成研究流程层面的处理建议。", judgment.investment_decision)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在生成研究建议",
+        progress=0.95,
+        message="已生成研究流程层面的处理建议。",
+    )
     insufficient_after_auto_research = _effective_evidence_count(evidence) < 3
     early_stop_reason = (
         "自动补证后有效证据仍少于3条，当前只能生成低置信度研究不足报告。"
@@ -632,12 +857,41 @@ def research_pipeline(
         else None
     )
     if early_stop_reason:
-        _emit_progress(progress_callback, "early_stop", early_stop_reason, judgment)
+        _update_progress(
+            tracker,
+            progress_callback,
+            step="研究流程提前结束",
+            progress=0.97,
+            message=early_stop_reason,
+        )
     roles = synthesize_role_outputs(topic, sources, evidence, variables, judgment)
-    _emit_progress(progress_callback, "roles", f"已生成 {len(roles)} 个角色视角。", roles)
-    report = generate_report(topic, questions, sources, evidence, variables, roles, judgment)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在生成角色复核",
+        progress=0.98,
+        message=f"已生成 {len(roles)} 个角色视角。",
+    )
+    report = generate_report(topic, questions, sources, evidence, variables, roles, judgment, financial_snapshot)
+    report = report.model_copy(
+        update={
+            "report_display": {
+                **report.report_display,
+                "developer_payload": {
+                    **report.report_display.get("developer_payload", {}),
+                    "auto_research_logs": [item.model_dump() for item in auto_result.trace],
+                },
+            }
+        }
+    )
     executive_summary = build_executive_summary(judgment, early_stop_reason)
-    _emit_progress(progress_callback, "report", "已生成最终报告。", report)
+    _update_progress(
+        tracker,
+        progress_callback,
+        step="正在生成最终报告",
+        progress=1.0,
+        message="已生成最终报告。",
+    )
 
     save_topic(repo, topic)
     save_questions(repo, questions)
@@ -660,4 +914,6 @@ def research_pipeline(
         "financial_snapshot": financial_snapshot,
         "early_stop_reason": early_stop_reason,
         "report": report,
+        "dashboard_view": report.report_display,
+        "progress": tracker,
     }

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from hashlib import md5
+from urllib.parse import urlparse
 
 from app.models.evidence import Evidence
+from app.models.financial import FinancialSnapshot
 from app.models.judgment import Judgment
 from app.models.question import Question
 from app.models.report import ReportSection, ResearchReport
@@ -10,6 +12,8 @@ from app.models.role import ResearchRoleOutput
 from app.models.source import Source
 from app.models.topic import Topic
 from app.models.variable import ResearchVariable
+from app.services.dashboard_projector import project_dashboard_view
+from app.services.evidence_registry import EvidenceRegistry, build_evidence_registry
 
 FRAMEWORK_LABELS = {
     "financial": "财务质量",
@@ -149,6 +153,10 @@ ACTION_STATUS_LABELS = {
     "running": "执行中",
     "done": "已完成",
     "skipped": "已跳过",
+    "triggered_for_high_priority_gap": "因高优先级缺口已触发",
+    "skipped_sufficient_coverage": "当前覆盖已足够，暂不补证",
+    "skipped_no_trusted_target_source": "缺少可信目标源，暂不补证",
+    "skipped_query_not_actionable": "当前查询不可执行，暂不补证",
     "skipped_duplicate_query": "因与已执行查询高度重复，未重复检索",
     "skipped_low_expected_yield": "预期补证收益较低，暂未执行",
     "skipped_source_budget_exceeded": "受本轮来源预算限制，未执行",
@@ -162,6 +170,22 @@ PRIORITY_LABELS = {
     "high": "高优先级",
     "medium": "中优先级",
     "low": "低优先级",
+}
+
+_METRIC_LABELS = {
+    "revenue": "营收",
+    "revenue_growth": "营收增速",
+    "net_income": "净利润",
+    "gross_margin": "毛利率",
+    "operating_cash_flow": "经营现金流",
+    "free_cash_flow": "自由现金流",
+    "capex": "资本开支",
+    "capital_expenditure": "资本开支",
+    "cloud_revenue": "云收入",
+    "market_share": "市场份额",
+    "pe": "PE",
+    "pb": "PB",
+    "ev_ebitda": "EV/EBITDA",
 }
 
 
@@ -203,6 +227,158 @@ def _humanize_text(text: str | None) -> str:
     for raw, label in replacements.items():
         output = output.replace(raw, label)
     return output
+
+
+def _source_family(source: Source | None) -> str:
+    if source is None:
+        return "unknown"
+    if source.url:
+        parsed = urlparse(source.url)
+        host = parsed.netloc.lower()
+        if host:
+            return host.removeprefix("www.")
+    return f"{source.provider}:{source.source_origin_type}"
+
+
+def _evidence_priority(item: Evidence, source: Source | None) -> tuple[int, int, float, float]:
+    has_metric = bool(item.metric_name)
+    has_number = item.metric_value is not None
+    origin = source.source_origin_type if source is not None else item.source_type or "unknown"
+    if has_metric and origin == "official_disclosure":
+        tier_rank = 0
+    elif has_metric and origin == "regulatory":
+        tier_rank = 1
+    elif has_metric and origin == "company_ir":
+        tier_rank = 2
+    elif has_metric and item.source_tier == "official":
+        tier_rank = 3
+    elif has_metric and item.source_tier == "professional":
+        tier_rank = 4
+    elif has_number and item.source_tier == "professional":
+        tier_rank = 5
+    else:
+        tier_rank = 8
+    narrative_rank = 0 if has_metric else 1 if has_number else 2
+    return (
+        tier_rank,
+        narrative_rank,
+        -(item.evidence_score or item.quality_score or 0.0),
+        -(source.source_score or 0.0) if source is not None else 0.0,
+    )
+
+
+def curate_evidence_for_display(evidence: list[Evidence], sources: list[Source], limit: int = 12) -> list[Evidence]:
+    source_map = {item.id: item for item in sources}
+    ordered = sorted(evidence, key=lambda item: _evidence_priority(item, source_map.get(item.source_id)))
+    curated: list[Evidence] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in ordered:
+        source = source_map.get(item.source_id)
+        dedupe_key = (
+            item.metric_name or item.content[:48],
+            item.period or "",
+            _source_family(source),
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        curated.append(item)
+        if len(curated) >= limit:
+            break
+    return curated
+
+
+def _sanitize_variables_for_registry(variables: list[ResearchVariable], registry: EvidenceRegistry) -> list[ResearchVariable]:
+    sanitized: list[ResearchVariable] = []
+    for item in variables:
+        evidence_ids = registry.filter_existing(item.evidence_ids)
+        if not evidence_ids:
+            continue
+        sanitized.append(item.model_copy(update={"evidence_ids": evidence_ids}))
+    return sanitized
+
+
+def _sanitize_roles_for_registry(roles: list[ResearchRoleOutput], registry: EvidenceRegistry) -> list[ResearchRoleOutput]:
+    sanitized: list[ResearchRoleOutput] = []
+    for role in roles:
+        evidence_ids = registry.filter_existing(role.evidence_ids)
+        sanitized.append(role.model_copy(update={"evidence_ids": evidence_ids}))
+    return sanitized
+
+
+def _sanitize_judgment_for_registry(judgment: Judgment, registry: EvidenceRegistry) -> Judgment:
+    return judgment.model_copy(
+        update={
+            "conclusion_evidence_ids": registry.filter_existing(judgment.conclusion_evidence_ids),
+            "clusters": [
+                item.model_copy(
+                    update={
+                        "support_evidence_ids": registry.filter_existing(item.support_evidence_ids),
+                        "counter_evidence_ids": registry.filter_existing(item.counter_evidence_ids),
+                    }
+                )
+                for item in judgment.clusters
+                if registry.filter_existing(item.support_evidence_ids) or registry.filter_existing(item.counter_evidence_ids)
+            ],
+            "risk": [
+                item.model_copy(update={"evidence_ids": registry.filter_existing(item.evidence_ids)})
+                for item in judgment.risk
+                if registry.filter_existing(item.evidence_ids)
+            ],
+            "bear_theses": [
+                item.model_copy(update={"evidence_ids": registry.filter_existing(item.evidence_ids)})
+                for item in judgment.bear_theses
+            ],
+            "pressure_tests": [
+                item.model_copy(
+                    update={
+                        "fragile_evidence_ids": registry.filter_existing(item.fragile_evidence_ids),
+                        "counter_evidence_ids": registry.filter_existing(item.counter_evidence_ids),
+                    }
+                )
+                for item in judgment.pressure_tests
+            ],
+            "catalysts": [
+                item.model_copy(update={"evidence_ids": registry.filter_existing(item.evidence_ids)})
+                for item in judgment.catalysts
+            ],
+            "research_actions": list(judgment.research_actions),
+            "peer_context": judgment.peer_context.model_copy(update={"evidence_ids": registry.filter_existing(judgment.peer_context.evidence_ids)})
+            if judgment.peer_context is not None
+            else None,
+            "investment_decision": judgment.investment_decision.model_copy(
+                update={"evidence_ids": registry.filter_existing(judgment.investment_decision.evidence_ids)}
+            )
+            if judgment.investment_decision is not None
+            else None,
+        }
+    )
+
+
+def _format_metric_value(item: Evidence) -> str:
+    if item.metric_value is None:
+        return item.content
+    value = str(item.metric_value)
+    unit = item.unit or ""
+    label = _METRIC_LABELS.get((item.metric_name or "").lower(), item.metric_name or "指标")
+    period = f"{item.period} " if item.period else ""
+    return f"{period}{label} {value}{unit}".strip()
+
+
+def _evidence_anchor_text(item: Evidence, source: Source | None) -> str:
+    source_label = "未知来源"
+    if source is not None:
+        if source.source_origin_type == "official_disclosure":
+            source_label = "官方披露"
+        elif source.source_origin_type == "regulatory":
+            source_label = "监管披露"
+        elif source.source_origin_type == "company_ir":
+            source_label = "公司 IR"
+        elif source.tier.value == "professional":
+            source_label = "专业来源"
+        else:
+            source_label = _label(SOURCE_ORIGIN_LABELS, source.source_origin_type)
+    return f"{_format_metric_value(item)}，{source_label}"
 
 
 def _build_background_section(topic: Topic) -> ReportSection:
@@ -316,15 +492,24 @@ def _build_variable_section(variables: list[ResearchVariable]) -> ReportSection:
     )
 
 
-def _build_finding_section(judgment: Judgment) -> ReportSection:
+def _build_finding_section(judgment: Judgment, evidence_map: dict[str, Evidence], source_map: dict[str, Source]) -> ReportSection:
     lines: list[str] = []
     evidence_ids: list[str] = []
-    for cluster in judgment.clusters:
-        support_text = "、".join(cluster.support_evidence_ids) if cluster.support_evidence_ids else "无"
-        counter_text = "、".join(cluster.counter_evidence_ids) if cluster.counter_evidence_ids else "无"
-        lines.append(f"{cluster.theme}：支持证据={support_text}；反向证据={counter_text}")
-        evidence_ids.extend(cluster.support_evidence_ids)
-        evidence_ids.extend(cluster.counter_evidence_ids)
+    if judgment.verified_facts:
+        for evidence_id in judgment.conclusion_evidence_ids[:6]:
+            item = evidence_map.get(evidence_id)
+            if item is None:
+                continue
+            lines.append(f"- {_evidence_anchor_text(item, source_map.get(item.source_id))}")
+            evidence_ids.append(evidence_id)
+    else:
+        for cluster in judgment.clusters:
+            anchor = next((evidence_map.get(eid) for eid in cluster.support_evidence_ids if eid in evidence_map), None)
+            if anchor is None:
+                continue
+            lines.append(f"- {cluster.theme}（证据：{_evidence_anchor_text(anchor, source_map.get(anchor.source_id))}）")
+            evidence_ids.extend(cluster.support_evidence_ids[:1])
+            evidence_ids.extend(cluster.counter_evidence_ids[:1])
 
     body = "\n".join(lines[:8]) if lines else "当前尚未形成稳定主题发现。"
     return ReportSection(
@@ -336,7 +521,7 @@ def _build_finding_section(judgment: Judgment) -> ReportSection:
 
 
 def _build_risk_section(judgment: Judgment) -> ReportSection:
-    lines = [f"- {item.text}（证据：{'、'.join(item.evidence_ids)}）" for item in judgment.risk]
+    lines = [f"- {item.text}（证据：{'、'.join(item.evidence_ids) if item.evidence_ids else '待补证'}）" for item in judgment.risk]
     body = "\n".join(lines) if lines else "当前未识别到有证据支撑的主要风险。"
     evidence_ids = [evidence_id for item in judgment.risk for evidence_id in item.evidence_ids]
     return ReportSection(
@@ -420,8 +605,14 @@ def _build_gap_section(judgment: Judgment) -> ReportSection:
     )
 
 
-def _build_judgment_section(judgment: Judgment) -> ReportSection:
+def _build_judgment_section(judgment: Judgment, evidence_map: dict[str, Evidence], source_map: dict[str, Source]) -> ReportSection:
     basis = judgment.confidence_basis
+    anchor_lines = []
+    for evidence_id in judgment.conclusion_evidence_ids[:4]:
+        item = evidence_map.get(evidence_id)
+        if item is None:
+            continue
+        anchor_lines.append(f"- {_evidence_anchor_text(item, source_map.get(item.source_id))}")
     body = (
         f"结论：{judgment.conclusion}\n"
         f"结论证据：{'、'.join(judgment.conclusion_evidence_ids) or '无'}\n"
@@ -431,7 +622,9 @@ def _build_judgment_section(judgment: Judgment) -> ReportSection:
         f"置信度依据：来源数={basis.source_count}，来源独立性={_label(SEVERITY_LABELS, basis.source_diversity)}，"
         f"冲突程度={_label(CONFLICT_LABELS, basis.conflict_level)}，缺口等级={_label(SEVERITY_LABELS, basis.evidence_gap_level)}，"
         f"有效证据数={basis.effective_evidence_count}，官方证据={basis.official_evidence_count}，"
-        f"是否仅依赖弱来源={'是' if basis.weak_source_only else '否'}"
+        f"是否仅依赖弱来源={'是' if basis.weak_source_only else '否'}，"
+        f"置信度评分={basis.confidence_score}\n"
+        f"关键锚点：\n{chr(10).join(anchor_lines) if anchor_lines else '- 无'}"
     )
     return ReportSection(
         title="初步判断",
@@ -550,7 +743,7 @@ def _build_action_section(judgment: Judgment) -> ReportSection:
 def _format_evidence_reference(evidence_id: str, evidence_map: dict[str, Evidence], source_map: dict[str, Source]) -> str:
     evidence = evidence_map.get(evidence_id)
     if evidence is None:
-        return f"[{evidence_id}] 证据不存在"
+        return ""
     source = source_map.get(evidence.source_id)
     if source is None:
         return f"[{evidence_id}] 原文片段：「{evidence.content}」"
@@ -573,8 +766,135 @@ def _render_markdown(sections: list[ReportSection], evidence: list[Evidence], so
         if section.evidence_ids:
             parts.append("\n\n证据引用：")
             for evidence_id in section.evidence_ids:
-                parts.append(_format_evidence_reference(evidence_id, evidence_map, source_map))
+                reference = _format_evidence_reference(evidence_id, evidence_map, source_map)
+                if reference:
+                    parts.append(reference)
     return "\n".join(parts).strip()
+
+
+def _serialize_evidence(item: Evidence, source: Source | None) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "metric_name": item.metric_name,
+        "metric_value": item.metric_value,
+        "unit": item.unit,
+        "period": item.period,
+        "quote": item.content,
+        "source_type": source.source_origin_type if source is not None else item.source_type,
+        "source_tier": item.source_tier,
+        "source_title": source.title if source is not None else None,
+        "url": source.url if source is not None else None,
+    }
+
+
+def _evidence_entry(item: Evidence, source: Source | None) -> dict[str, object]:
+    return {
+        "evidence_ids": [item.id],
+        "anchor": _evidence_anchor_text(item, source),
+    }
+
+
+def _render_research_memo_markdown(report_display: dict[str, object]) -> str:
+    memo = report_display.get("research_memo") or {}
+    if not memo:
+        return ""
+    lines = [
+        "## Verdict",
+        f"- {memo.get('verdict', 'Under Review')}",
+        f"- Confidence: {memo.get('confidence', 'Low')}",
+        "",
+        "## Headline",
+        str(memo.get("headline") or "暂无结论。"),
+        "",
+        "## Snapshot Dashboard",
+        "| Category | Status |",
+        "|---|---|",
+    ]
+    for row in memo.get("snapshot_dashboard", []):
+        lines.append(f"| {row.get('category', '')} | {row.get('status', '')} |")
+    lines.extend(
+        [
+            "",
+            "## Financial Quality",
+            str((memo.get("financial_quality") or {}).get("summary") or "暂无。"),
+            "",
+            "## Cash Flow Bridge",
+            "| Metric | Current | YoY | Status |",
+            "|---|---|---|---|",
+        ]
+    )
+    for row in (memo.get("cash_flow_bridge") or {}).get("rows", []):
+        lines.append(f"| {row.get('metric', '')} | {row.get('current', '')} | {row.get('yoy', '')} | {row.get('status', '')} |")
+    valuation = memo.get("valuation") or {}
+    lines.extend(
+        [
+            "",
+            "## Valuation",
+            "",
+            "### Absolute",
+            f"Assessment: {(valuation.get('absolute') or {}).get('assessment', 'Under Review')}",
+            "",
+            "| Metric | Current | Historical | Percentile |",
+            "|---|---|---|---|",
+        ]
+    )
+    for row in (valuation.get("absolute") or {}).get("rows", []):
+        lines.append(f"| {row.get('metric', '')} | {row.get('current', '')} | {row.get('historical', '')} | {row.get('percentile', '')} |")
+    lines.extend(["", "### Relative Peers", "| Company | P/E | Rev Growth | Margin | FCF Yield |", "|---|---|---|---|---|"])
+    for row in (valuation.get("relative_peers") or {}).get("rows", []):
+        lines.append(f"| {row.get('company', '')} | {row.get('pe', '')} | {row.get('rev_growth', '')} | {row.get('margin', '')} | {row.get('fcf_yield', '')} |")
+    lines.extend(
+        [
+            "",
+            "### Market-Implied Narrative",
+            str(valuation.get("market_implied_narrative") or "暂无。"),
+            "",
+            "### Re-rating Triggers",
+        ]
+    )
+    for item in valuation.get("rerating_triggers", []):
+        lines.append(f"- {item}")
+    competition = memo.get("competition") or {}
+    lines.extend(
+        [
+            "",
+            "## Competition",
+            "| Dimension | Score |",
+            "|---|---|",
+        ]
+    )
+    for row in competition.get("framework", []):
+        lines.append(f"| {row.get('dimension', '')} | {row.get('score', '')} |")
+    lines.extend(["", "| Company | Share | Growth | Margin | Moat |", "|---|---|---|---|---|"])
+    for row in competition.get("peer_table", []):
+        lines.append(f"| {row.get('company', '')} | {row.get('market_share', '')} | {row.get('rev_growth', '')} | {row.get('margin', '')} | {row.get('moat', '')} |")
+    lines.extend(
+        [
+            "",
+            str(competition.get("summary") or "暂无竞争总结。"),
+            "",
+            "## Bull Case",
+        ]
+    )
+    for item in memo.get("bull_case", []):
+        lines.append(f"- {item}")
+    lines.extend(["", "## Bear Case"])
+    for item in memo.get("bear_case", []):
+        lines.append(f"- {item}")
+    changes = memo.get("what_changes_my_mind") or {}
+    lines.extend(["", "## What Changes My Mind", "", "### Upgrade Triggers"])
+    for item in changes.get("upgrade_triggers", []):
+        lines.append(f"- {item}")
+    lines.extend(["", "### Downgrade Triggers"])
+    for item in changes.get("downgrade_triggers", []):
+        lines.append(f"- {item}")
+    lines.extend(["", "## Evidence Gaps"])
+    for item in memo.get("evidence_gaps", []):
+        lines.append(f"- {item}")
+    lines.extend(["", "## Next Research Actions"])
+    for item in memo.get("next_research_actions", []):
+        lines.append(f"- {item.get('action', '')}: {item.get('why', '')}")
+    return "\n".join(lines).strip()
 
 
 def generate_report(
@@ -585,38 +905,68 @@ def generate_report(
     variables: list[ResearchVariable],
     roles: list[ResearchRoleOutput],
     judgment: Judgment,
+    financial_snapshot: FinancialSnapshot | None = None,
 ) -> ResearchReport:
     """Render a user-facing report from structured research artifacts."""
 
     report_seed = f"{topic.id}:{len(questions)}:{len(sources)}:{len(evidence)}"
     report_id = f"report_{md5(report_seed.encode('utf-8')).hexdigest()[:8]}"
+    registry = build_evidence_registry(evidence, topic=topic, sources=sources)
+    display_judgment = _sanitize_judgment_for_registry(judgment, registry)
+    display_variables = _sanitize_variables_for_registry(variables, registry)
+    display_roles = _sanitize_roles_for_registry(roles, registry)
+    curated_evidence = curate_evidence_for_display(registry.evidence, sources)
+    curated_map = {item.id: item for item in curated_evidence}
+    source_map = {item.id: item for item in sources}
 
     sections = [
         _build_background_section(topic),
         _build_framework_section(questions),
-        _build_source_governance_section(sources, evidence),
-        _build_role_section(roles),
-        _build_variable_section(variables),
-        _build_finding_section(judgment),
-        _build_risk_section(judgment),
-        _build_bear_thesis_section(judgment),
-        _build_pressure_section(judgment),
-        _build_catalyst_section(judgment),
-        _build_gap_section(judgment),
-        _build_judgment_section(judgment),
-        _build_investment_section(judgment),
-        _build_action_section(judgment),
+        _build_source_governance_section(sources, registry.evidence),
+        _build_role_section(display_roles),
+        _build_variable_section(display_variables),
+        _build_finding_section(display_judgment, curated_map, source_map),
+        _build_risk_section(display_judgment),
+        _build_bear_thesis_section(display_judgment),
+        _build_pressure_section(display_judgment),
+        _build_catalyst_section(display_judgment),
+        _build_gap_section(display_judgment),
+        _build_judgment_section(display_judgment, curated_map, source_map),
+        _build_investment_section(display_judgment),
+        _build_action_section(display_judgment),
     ]
+    report_internal = {
+        "registry_total": registry.total_count,
+        "registry_displayable": registry.displayable_count,
+        "raw_evidence_count": len(evidence),
+    }
+    report_display = project_dashboard_view(
+        topic=topic,
+        questions=questions,
+        sources=sources,
+        raw_evidence=evidence,
+        registry=registry,
+        variables=display_variables,
+        judgment=display_judgment,
+        report_internal=report_internal,
+        financial_snapshot=financial_snapshot,
+    )
+    markdown = _render_markdown(sections, curated_evidence, sources)
+    memo_markdown = _render_research_memo_markdown(report_display)
+    if memo_markdown:
+        markdown = markdown.replace("# 投研初步研究报告", "# 投研初步研究报告\n\n" + memo_markdown, 1)
 
     return ResearchReport(
         id=report_id,
         topic=topic,
         questions=questions,
         sources=sources,
-        evidence=evidence,
-        variables=variables,
-        roles=roles,
-        judgment=judgment,
+        evidence=curated_evidence,
+        variables=display_variables,
+        roles=display_roles,
+        judgment=display_judgment,
         report_sections=sections,
-        markdown=_render_markdown(sections, evidence, sources),
+        markdown=markdown,
+        report_internal=report_internal,
+        report_display=report_display,
     )

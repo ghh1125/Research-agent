@@ -221,6 +221,67 @@ class ReasonStepTest(unittest.TestCase):
         self.assertTrue(any(item.attack_type == "evidence_gap" for item in judgment.pressure_tests))
         self.assertNotEqual(judgment.confidence, "low")
 
+    def test_official_metric_evidence_can_raise_confidence_to_medium(self) -> None:
+        topic = Topic(
+            id="topic_conf_001",
+            query="我想投资阿里巴巴，是否值得进一步研究",
+            topic="阿里巴巴研究价值",
+            goal="判断是否值得继续研究",
+            type="company",
+            entity="阿里巴巴",
+            research_object_type="listed_company",
+        )
+        questions = [
+            Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1, framework_type="financial", coverage_level="covered"),
+            Question(id="q2", topic_id=topic.id, content="估值锚点如何", priority=1, framework_type="valuation", coverage_level="partial"),
+            Question(id="q3", topic_id=topic.id, content="行业竞争如何", priority=1, framework_type="industry", coverage_level="partial"),
+        ]
+        evidence = [
+            Evidence(id="e1", topic_id=topic.id, question_id="q1", source_id="s1", source_tier="official", evidence_score=0.9, content="Revenue was RMB996347 million in FY2025.", evidence_type="data", metric_name="revenue", metric_value=996347, unit="million", period="FY2025"),
+            Evidence(id="e2", topic_id=topic.id, question_id="q1", source_id="s1", source_tier="official", evidence_score=0.9, content="Operating cash flow was RMB163509 million in FY2025.", evidence_type="data", metric_name="operating_cash_flow", metric_value=163509, unit="million", period="FY2025"),
+            Evidence(id="e3", topic_id=topic.id, question_id="q1", source_id="s1", source_tier="official", evidence_score=0.88, content="Free cash flow was RMB15200 million in FY2025.", evidence_type="data", metric_name="free_cash_flow", metric_value=15200, unit="million", period="FY2025"),
+            Evidence(id="e4", topic_id=topic.id, question_id="q1", source_id="s2", source_tier="official", evidence_score=0.86, content="Cloud revenue grew 35% YoY in FY2025Q3.", evidence_type="data", metric_name="cloud_revenue", metric_value=35, unit="%", period="FY2025Q3"),
+            Evidence(id="e5", topic_id=topic.id, question_id="q2", source_id="s3", source_tier="professional", evidence_score=0.82, content="PE was 12x versus peers at 15x.", evidence_type="data", metric_name="pe", metric_value=12, unit="x", period="TTM"),
+            Evidence(id="e6", topic_id=topic.id, question_id="q3", source_id="s4", source_tier="professional", evidence_score=0.8, content="Market share remained 18% with peer rank second.", evidence_type="data", metric_name="market_share", metric_value=18, unit="%", period="FY2025"),
+        ]
+
+        judgment = reason_and_generate(topic, evidence, questions)
+
+        self.assertIn(judgment.confidence, {"medium", "high"})
+        self.assertGreaterEqual(judgment.confidence_basis.confidence_score, 3)
+        self.assertGreaterEqual(judgment.confidence_basis.source_quality_score, 1)
+        self.assertGreaterEqual(judgment.confidence_basis.evidence_quality_score, 2)
+
+    def test_low_confidence_conclusion_is_guardrailed(self) -> None:
+        topic = Topic(
+            id="topic_conf_002",
+            query="我想投资某公司，是否值得进一步研究",
+            topic="某公司研究价值",
+            goal="判断是否值得继续研究",
+            type="company",
+            entity="某公司",
+        )
+        questions = [Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1, framework_type="financial")]
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                source_tier="content",
+                evidence_score=0.4,
+                content="社区讨论认为公司估值具吸引力并已企稳。",
+                evidence_type="claim",
+                stance="neutral",
+            )
+        ]
+
+        judgment = reason_and_generate(topic, evidence, questions)
+
+        self.assertEqual(judgment.confidence, "low")
+        self.assertNotIn("估值具吸引力", judgment.conclusion)
+        self.assertTrue("证据不足" in judgment.conclusion or "待验证" in judgment.conclusion)
+
     def test_logic_gap_pressure_test_uses_llm_attack(self) -> None:
         evidence = Evidence(
             id="e1",
@@ -426,6 +487,113 @@ class ReasonStepTest(unittest.TestCase):
         self.assertEqual(judgment.conclusion_evidence_ids, ["e1"])
         self.assertEqual(judgment.debug_observability["JUDGMENT_ALLOWED_EVIDENCE_COUNT"], 1)
         self.assertEqual(judgment.debug_observability["JUDGMENT_BLOCKED_EVIDENCE_COUNT"], 1)
+
+    @patch(
+        "app.agent.steps.reason.call_llm",
+        return_value=(
+            '{"conclusion":"阿里巴巴具备明确投资价值","conclusion_evidence_ids":["e_missing","e1"],'
+            '"clusters":[],"risk":[{"text":"现金流承压","evidence_ids":["e_missing_2","e1"]}],"unknown":[],"confidence":"high"}'
+        ),
+    )
+    def test_reason_drops_broken_references_instead_of_reviving_them(self, reason_llm_mock) -> None:
+        topic = Topic(
+            id="topic_registry_reason",
+            query="我想投资阿里巴巴，是否值得进一步研究",
+            topic="阿里巴巴研究价值",
+            goal="判断是否值得继续研究",
+            type="company",
+            entity="阿里巴巴",
+            research_object_type="listed_company",
+        )
+        questions = [Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1, framework_type="financial", coverage_level="covered")]
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="Revenue was RMB996347 million in FY2025.",
+                evidence_type="data",
+                source_tier="official",
+                evidence_score=0.92,
+                metric_name="revenue",
+                metric_value=996347,
+                unit="million",
+                period="FY2025",
+            ),
+            Evidence(
+                id="e2",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="This invalid evidence should never be revived.",
+                evidence_type="claim",
+                source_tier="official",
+                can_enter_main_chain=False,
+            ),
+        ]
+
+        judgment = reason_and_generate(topic, evidence, questions, [])
+
+        self.assertEqual(judgment.conclusion_evidence_ids, ["e1"])
+        self.assertEqual(judgment.risk[0].evidence_ids, ["e1"])
+        self.assertGreaterEqual(int(judgment.debug_observability.get("BROKEN_EVIDENCE_REF_DROPPED", 0)), 2)
+        self.assertIn("llm_conclusion", str(judgment.debug_observability.get("BROKEN_EVIDENCE_REF_LOCATIONS", "")))
+
+    @patch(
+        "app.agent.steps.reason.call_llm",
+        return_value=(
+            '{"conclusion":"继续研究","conclusion_evidence_ids":["e1","e2"],'
+            '"clusters":[],"risk":[],"unknown":[],"confidence":"medium"}'
+        ),
+    )
+    def test_estimate_evidence_does_not_enter_verified_facts(self, reason_llm_mock) -> None:
+        topic = Topic(
+            id="topic_estimate_reason",
+            query="我想投资阿里巴巴，是否值得进一步研究",
+            topic="阿里巴巴研究价值",
+            goal="判断是否值得继续研究",
+            type="company",
+            entity="阿里巴巴",
+            research_object_type="listed_company",
+        )
+        questions = [Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1, framework_type="financial", coverage_level="covered")]
+        evidence = [
+            Evidence(
+                id="e1",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="Revenue was RMB996347 million in FY2025.",
+                evidence_type="data",
+                source_tier="official",
+                evidence_score=0.92,
+                metric_name="revenue",
+                metric_value=996347,
+                unit="million",
+                period="FY2025",
+            ),
+            Evidence(
+                id="e2",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="Consensus expects revenue to reach RMB120 billion in FY2026.",
+                evidence_type="data",
+                source_tier="professional",
+                evidence_score=0.8,
+                metric_name="revenue",
+                metric_value=120,
+                unit="billion",
+                period="FY2026",
+                quality_notes=["estimate"],
+            ),
+        ]
+
+        judgment = reason_and_generate(topic, evidence, questions, [])
+
+        self.assertTrue(judgment.verified_facts)
+        self.assertFalse(any("FY2026" in item for item in judgment.verified_facts))
 
 
 if __name__ == "__main__":

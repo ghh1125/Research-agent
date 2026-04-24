@@ -13,6 +13,20 @@ class ApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(create_app())
 
+
+    def _fake_llm_extract(self) -> str:
+        return (
+            '{"evidences":['
+            '{"metric_name":"revenue","metric_value":100,"unit":"亿元","period":"FY2026",'
+            '"entity":"研究对象","quote":"FY2026研究对象营收增长至100亿元。","extraction_confidence":0.9},'
+            '{"metric_name":"operating_cash_flow","metric_value":12,"unit":"亿元","period":"FY2026",'
+            '"entity":"研究对象","quote":"FY2026公司披露经营现金流改善至12亿元。","extraction_confidence":0.9},'
+            '{"metric_name":"gross_margin","metric_value":24.6,"unit":"%","period":"FY2026",'
+            '"entity":"研究对象","quote":"FY2026毛利率为24.6%。","extraction_confidence":0.9},'
+            '{"metric_name":"regulatory_risk","metric_value":null,"unit":null,"period":null,'
+            '"entity":"研究对象","quote":"合规方面需要关注监管资质、许可边界、合同授权和潜在处罚记录。","extraction_confidence":0.9}'
+            ']}')
+
     def _fake_search(self, query: str) -> list[dict]:
         digest = md5(query.encode("utf-8")).hexdigest()[:8]
         content = (
@@ -55,13 +69,14 @@ class ApiTest(unittest.TestCase):
     ) -> None:
         search_mock.side_effect = self._fake_search
         auto_search_mock.side_effect = self._fake_search
-        response = self.client.post("/research", json={"query": "研究贸易企业违约原因"})
+        with patch("app.services.llm_evidence_extractor.call_llm", return_value=self._fake_llm_extract()):
+            response = self.client.post("/research", json={"query": "研究贸易企业违约原因"})
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(
             set(body.keys()),
-            {"topic", "questions", "sources", "evidence", "variables", "roles", "judgment", "auto_research_trace", "executive_summary", "financial_snapshot", "early_stop_reason", "report"},
+            {"topic", "questions", "sources", "evidence", "variables", "roles", "judgment", "auto_research_trace", "executive_summary", "financial_snapshot", "early_stop_reason", "report", "dashboard_view"},
         )
         self.assertTrue(body["sources"])
         self.assertTrue(all(item["content"] for item in body["sources"]))
@@ -104,6 +119,12 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(all("text" in item and "evidence_ids" in item for item in body["judgment"]["risk"]))
         self.assertTrue(all(isinstance(item, str) for item in body["judgment"]["unknown"]))
         self.assertTrue(body["report"]["report_sections"])
+        self.assertIn("headline", body["dashboard_view"])
+        self.assertIn("summary_cards", body["dashboard_view"])
+        self.assertIn("developer_payload", body["dashboard_view"])
+        self.assertIn("research_memo", body["dashboard_view"])
+        self.assertIn("competition", body["dashboard_view"]["research_memo"])
+        self.assertIn("valuation", body["dashboard_view"]["research_memo"])
         self.assertTrue(any(item["section_type"] == "role" for item in body["report"]["report_sections"]))
         self.assertTrue(any(item["section_type"] == "variable" for item in body["report"]["report_sections"]))
         self.assertTrue(any(item["section_type"] == "investment" for item in body["report"]["report_sections"]))

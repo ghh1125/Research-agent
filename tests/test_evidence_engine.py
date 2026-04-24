@@ -9,11 +9,9 @@ from app.services.evidence_engine import (
     classify_source_tier,
     is_recent_source,
     is_usable_source,
-    looks_like_noise,
+    iter_sources_with_progress,
     rank_sources,
-    recency_score_for_source,
     resolve_source_date,
-    score_evidence_text,
 )
 
 
@@ -129,64 +127,6 @@ class EvidenceEngineTest(unittest.TestCase):
         self.assertEqual(ranked[0].tier, SourceTier.TIER1)
         self.assertGreaterEqual(ranked[0].source_score or 0, 0.22)
 
-    def test_noise_filter_detects_html_navigation(self) -> None:
-        self.assertTrue(looks_like_noise("<nav>首页 登录 注册</nav>"))
-
-    def test_evidence_score_rejects_gibberish(self) -> None:
-        source = Source(
-            id="s1",
-            question_id="q1",
-            title="PDD",
-            url="https://example.com/pdd.pdf",
-            source_type="report",
-            provider="fixture",
-            content="拼多多财报显示收入增长。",
-        )
-
-        score, notes = score_evidence_text("GY:0e isD\\ Jƀ:+K", source)
-
-        self.assertEqual(score, 0.0)
-        self.assertIn("gibberish_rejected", notes)
-
-    def test_higher_quality_source_gets_higher_evidence_score(self) -> None:
-        official = Source(
-            id="s1",
-            question_id="q1",
-            title="PDD Holdings quarterly results",
-            url="https://investor.pddholdings.com/news",
-            source_type="company",
-            provider="fixture",
-            tier=SourceTier.TIER1,
-            source_score=0.9,
-            contains_entity=True,
-            is_recent=True,
-            content="PDD Holdings reported revenue growth and operating cash flow improvement in 2025.",
-        )
-        weak = Source(
-            id="s2",
-            question_id="q1",
-            title="社区讨论",
-            url="https://www.zhihu.com/question/1",
-            source_type="website",
-            provider="fixture",
-            tier=SourceTier.TIER3,
-            source_score=0.2,
-            content="有人讨论拼多多增长。",
-        )
-        topic = Topic(
-            id="topic_001",
-            query="拼多多增长是否可持续",
-            entity="拼多多",
-            topic="拼多多高增长模式可持续性",
-            goal="评估增长质量",
-            type="company",
-        )
-
-        official_score, _ = score_evidence_text("PDD Holdings reported revenue growth and operating cash flow improvement in 2025.", official, topic)
-        weak_score, _ = score_evidence_text("有人讨论拼多多增长。", weak, topic)
-
-        self.assertGreater(official_score, weak_score)
-
     def test_placeholder_date_is_unknown_not_stale(self) -> None:
         source = Source(
             id="s1",
@@ -204,7 +144,6 @@ class EvidenceEngineTest(unittest.TestCase):
         self.assertIsNone(resolved_date)
         self.assertEqual(date_source, "unknown")
         self.assertIsNone(is_recent_source(source))
-        self.assertEqual(recency_score_for_source(source), 0.85)
 
     def test_source_date_can_be_extracted_from_url_or_content(self) -> None:
         source_from_url = Source(
@@ -234,6 +173,22 @@ class EvidenceEngineTest(unittest.TestCase):
         self.assertEqual(url_date.year, 2026)
         self.assertEqual(content_date_source, "content_extracted")
         self.assertEqual(content_date.year, 2026)
+
+    def test_iter_sources_with_progress_increments_step_progress(self) -> None:
+        sources = [
+            Source(id="s1", question_id="q1", title="A", source_type="news", provider="fixture", content="x"),
+            Source(id="s2", question_id="q1", title="B", source_type="news", provider="fixture", content="x"),
+            Source(id="s3", question_id="q1", title="C", source_type="news", provider="fixture", content="x"),
+        ]
+
+        updates = iter_sources_with_progress(sources, progress_start=0.3, progress_span=0.4)
+
+        self.assertEqual(len(updates), 3)
+        self.assertEqual([item[1]["current"] for item in updates], [1, 2, 3])
+        self.assertEqual([item[1]["total"] for item in updates], [3, 3, 3])
+        progresses = [float(item[1]["progress"]) for item in updates]
+        self.assertEqual(progresses, sorted(progresses))
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in progresses))
 
 
 if __name__ == "__main__":

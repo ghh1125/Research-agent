@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.agent.steps.report import generate_report
+from app.agent.steps.report import curate_evidence_for_display, generate_report
 from app.models.evidence import Evidence
 from app.models.judgment import (
     ConfidenceBasis,
@@ -158,3 +158,193 @@ def test_report_renders_user_facing_labels_without_engineering_keys() -> None:
     assert "观察清单" in report.markdown
     assert "建议进入深度研究" in report.markdown
     assert "是否仅依赖弱来源=是" in report.markdown
+
+
+def test_report_curates_evidence_to_top_12_and_deduplicates_metrics() -> None:
+    topic = Topic(
+        id="topic_2",
+        query="我想投资阿里巴巴，是否值得进一步研究",
+        entity="阿里巴巴",
+        topic="阿里巴巴研究价值",
+        goal="判断是否继续研究",
+        type="company",
+        research_object_type="listed_company",
+        listing_status="listed",
+        market_type="HK",
+    )
+    questions = [Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1, framework_type="financial", coverage_level="covered")]
+    sources = []
+    evidence = []
+    for idx in range(1, 15):
+        source_id = f"s{idx}"
+        sources.append(
+            Source(
+                id=source_id,
+                question_id="q1",
+                title=f"Official source {idx}",
+                url=f"https://ir.example.com/{idx}",
+                source_type="company",
+                provider="fixture",
+                source_origin_type="company_ir",
+                credibility_tier="tier1",
+                tier=SourceTier.TIER1,
+                source_score=0.9,
+                content="official content",
+            )
+        )
+        evidence.append(
+            Evidence(
+                id=f"e{idx}",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id=source_id,
+                content=f"Revenue was RMB{100+idx} million in FY2025.",
+                evidence_type="data",
+                source_tier="official",
+                evidence_score=0.9 - idx * 0.01,
+                metric_name="revenue",
+                metric_value=100 + idx,
+                unit="million",
+                period="FY2025",
+            )
+        )
+    evidence.extend(
+        [
+            Evidence(
+                id="e20",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s1",
+                content="Revenue was RMB999 million in FY2025.",
+                evidence_type="data",
+                source_tier="official",
+                evidence_score=0.95,
+                metric_name="revenue",
+                metric_value=999,
+                unit="million",
+                period="FY2025",
+            ),
+            Evidence(
+                id="e21",
+                topic_id=topic.id,
+                question_id="q1",
+                source_id="s2",
+                content="Operating cash flow was RMB120 million in FY2025.",
+                evidence_type="data",
+                source_tier="official",
+                evidence_score=0.93,
+                metric_name="operating_cash_flow",
+                metric_value=120,
+                unit="million",
+                period="FY2025",
+            ),
+        ]
+    )
+    judgment = Judgment(
+        topic_id=topic.id,
+        conclusion="值得继续标准研究。",
+        conclusion_evidence_ids=["e20", "e21"],
+        clusters=[],
+        risk=[],
+        unknown=[],
+        evidence_gaps=[],
+        confidence="medium",
+        confidence_basis=ConfidenceBasis(source_count=3, source_diversity="high", conflict_level="none", evidence_gap_level="low", effective_evidence_count=8, has_official_source=True, official_evidence_count=8),
+        research_actions=[],
+    )
+
+    curated = curate_evidence_for_display(evidence, sources)
+    report = generate_report(topic, questions, sources, evidence, [], [], judgment)
+
+    assert len(curated) <= 12
+    assert len(report.evidence) <= 12
+    revenue_ids = [item.id for item in curated if item.metric_name == "revenue" and item.period == "FY2025"]
+    assert revenue_ids
+    assert "e20" in revenue_ids
+
+
+def test_report_never_renders_evidence_not_found_or_registry_external_evidence() -> None:
+    topic = Topic(
+        id="topic_registry_report",
+        query="研究阿里巴巴",
+        entity="阿里巴巴",
+        topic="阿里巴巴研究价值",
+        goal="判断是否继续研究",
+        type="company",
+        research_object_type="listed_company",
+        listing_status="listed",
+        market_type="HK",
+    )
+    questions = [Question(id="q1", topic_id=topic.id, content="财务质量如何", priority=1, framework_type="financial", coverage_level="covered")]
+    sources = [
+        Source(
+            id="s1",
+            question_id="q1",
+            title="Alibaba IR",
+            url="https://www.alibabagroup.com/ir-results",
+            source_type="company",
+            provider="fixture",
+            source_origin_type="company_ir",
+            credibility_tier="tier1",
+            tier=SourceTier.TIER1,
+            source_score=0.94,
+            content="official content",
+        )
+    ]
+    evidence = [
+        Evidence(
+            id="e1",
+            topic_id=topic.id,
+            question_id="q1",
+            source_id="s1",
+            content="Revenue was RMB996347 million in FY2025.",
+            evidence_type="data",
+            source_tier="official",
+            evidence_score=0.9,
+            metric_name="revenue",
+            metric_value=996347,
+            unit="million",
+            period="FY2025",
+        ),
+        Evidence(
+            id="e2",
+            topic_id=topic.id,
+            question_id="q1",
+            source_id="s1",
+            content="Invalid broken evidence should never be displayed.",
+            evidence_type="claim",
+            source_tier="official",
+            can_enter_main_chain=False,
+        ),
+    ]
+    judgment = Judgment(
+        topic_id=topic.id,
+        conclusion="继续研究，但只基于有效主链证据。",
+        conclusion_evidence_ids=["e_missing", "e2", "e1"],
+        verified_facts=["revenue FY2025: Revenue was RMB996347 million in FY2025."],
+        probable_inferences=["当前结论只应绑定 e1。"],
+        pending_assumptions=["估值与行业竞争仍待补证。"],
+        clusters=[],
+        risk=[],
+        pressure_tests=[],
+        unknown=[],
+        evidence_gaps=[],
+        confidence="medium",
+        confidence_basis=ConfidenceBasis(
+            source_count=1,
+            source_diversity="low",
+            conflict_level="none",
+            evidence_gap_level="low",
+            effective_evidence_count=1,
+            has_official_source=True,
+            official_evidence_count=1,
+        ),
+        research_actions=[],
+    )
+
+    report = generate_report(topic, questions, sources, evidence, [], [], judgment)
+
+    assert "证据不存在" not in report.markdown
+    assert [item.id for item in report.evidence] == ["e1"]
+    curated_ids = [item["id"] for item in report.report_display["curated_evidence"]]
+    assert curated_ids == ["e1"]

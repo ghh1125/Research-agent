@@ -10,6 +10,24 @@ from app.models.financial import FinancialSnapshot
 
 
 class PipelineTest(unittest.TestCase):
+
+    def _fake_llm_extract(self) -> str:
+        return (
+            '{"evidences":['
+            '{"metric_name":"revenue","metric_value":100,"unit":"亿元","period":"FY2026",'
+            '"entity":"研究对象","quote":"FY2026研究对象营业收入100亿元，同比增长12%。","extraction_confidence":0.9},'
+            '{"metric_name":"net_income","metric_value":8,"unit":"亿元","period":"FY2026",'
+            '"entity":"研究对象","quote":"FY2026净利润8亿元，同比增长5%。","extraction_confidence":0.9},'
+            '{"metric_name":"operating_cash_flow","metric_value":12,"unit":"亿元","period":"FY2026",'
+            '"entity":"研究对象","quote":"FY2026公司披露经营现金流12亿元。","extraction_confidence":0.9},'
+            '{"metric_name":"capex","metric_value":6,"unit":"亿元","period":"FY2026",'
+            '"entity":"研究对象","quote":"FY2026资本开支6亿元，自由现金流6亿元。","extraction_confidence":0.9},'
+            '{"metric_name":"market_share","metric_value":18,"unit":"%","period":"FY2026",'
+            '"entity":"研究对象","quote":"FY2026行业资料显示公司市场份额18%，同行排名第二。","extraction_confidence":0.9},'
+            '{"metric_name":"regulatory_risk","metric_value":null,"unit":null,"period":null,'
+            '"entity":"研究对象","quote":"合规方面需要关注监管资质、许可边界、合同授权和潜在处罚记录。","extraction_confidence":0.9}'
+            ']}')
+
     def _fake_search(self, query: str) -> list[dict]:
         digest = md5(query.encode("utf-8")).hexdigest()[:8]
         content = (
@@ -55,7 +73,8 @@ class PipelineTest(unittest.TestCase):
         auto_search_mock.side_effect = self._fake_search
         repository = InMemoryResearchRepository()
 
-        result = research_pipeline("研究贸易企业违约原因", repository=repository)
+        with patch("app.services.llm_evidence_extractor.call_llm", return_value=self._fake_llm_extract()):
+            result = research_pipeline("研究贸易企业违约原因", repository=repository)
         judgment = result["judgment"]
         evidence_ids = {item.id for item in result["evidence"]}
 
@@ -71,7 +90,7 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(judgment.confidence_basis.source_count >= 1)
         self.assertTrue(judgment.pressure_tests)
         self.assertTrue(all(item.evidence_ids for item in judgment.risk))
-        self.assertEqual(set(result.keys()), {"topic", "questions", "sources", "evidence", "variables", "roles", "judgment", "auto_research_trace", "executive_summary", "financial_snapshot", "early_stop_reason", "report"})
+        self.assertEqual(set(result.keys()), {"topic", "questions", "sources", "evidence", "variables", "roles", "judgment", "auto_research_trace", "executive_summary", "financial_snapshot", "early_stop_reason", "report", "dashboard_view", "progress"})
         self.assertIsNotNone(result["financial_snapshot"])
         self.assertTrue(result["variables"])
         self.assertEqual(len(result["roles"]), 5)
@@ -79,6 +98,11 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(any(question.coverage_level in {"partial", "covered"} for question in result["questions"]))
         self.assertTrue(any(question.framework_type == "adversarial" for question in result["questions"]))
         self.assertTrue(result["report"].report_sections)
+        self.assertIn("headline", result["dashboard_view"])
+        self.assertIn("developer_payload", result["dashboard_view"])
+        self.assertIn("research_memo", result["dashboard_view"])
+        self.assertIn("cash_flow_bridge", result["dashboard_view"]["research_memo"])
+        self.assertIn("valuation", result["dashboard_view"]["research_memo"])
         self.assertTrue(any(section.section_type == "source" for section in result["report"].report_sections))
         self.assertTrue(any(section.section_type == "role" for section in result["report"].report_sections))
         self.assertTrue(any(section.section_type == "variable" for section in result["report"].report_sections))
@@ -113,13 +137,68 @@ class PipelineTest(unittest.TestCase):
         auto_search_mock.side_effect = self._fake_search
         repository = InMemoryResearchRepository()
 
-        result = research_pipeline("这个经营权模式有没有合规风险", repository=repository)
+        with patch("app.services.llm_evidence_extractor.call_llm", return_value=self._fake_llm_extract()):
+            result = research_pipeline("这个经营权模式有没有合规风险", repository=repository)
         judgment = result["judgment"]
 
         self.assertIn("合规", judgment.conclusion)
         self.assertTrue(judgment.conclusion_evidence_ids)
         self.assertTrue(judgment.unknown)
         self.assertTrue(result["report"].report_sections)
+
+    @patch("app.agent.steps.reason.call_llm", side_effect=RuntimeError("skip llm in unit test"))
+    @patch("app.agent.steps.decompose.call_llm", side_effect=RuntimeError("skip llm in unit test"))
+    @patch("app.agent.steps.define.call_llm", side_effect=RuntimeError("skip llm in unit test"))
+    @patch("app.agent.steps.auto_research.search")
+    @patch("app.agent.steps.retrieve.search")
+    def test_research_pipeline_emits_monotonic_progress_updates(
+        self,
+        search_mock,
+        auto_search_mock,
+        define_llm_mock,
+        decompose_llm_mock,
+        reason_llm_mock,
+    ) -> None:
+        search_mock.side_effect = self._fake_search
+        auto_search_mock.side_effect = self._fake_search
+        progress_updates: list[dict] = []
+
+        def _collect_progress(step: str, message: str, payload) -> None:
+            if isinstance(payload, dict):
+                progress_updates.append(payload.copy())
+
+        with patch("app.services.llm_evidence_extractor.call_llm", return_value=self._fake_llm_extract()):
+            result = research_pipeline(
+                "研究贸易企业违约原因",
+                progress_callback=_collect_progress,
+            )
+
+        self.assertTrue(progress_updates)
+        overall_progresses = [float(item["overall_progress"]) for item in progress_updates]
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in overall_progresses))
+        self.assertEqual(overall_progresses, sorted(overall_progresses))
+
+        step_labels = {str(item["current_step"]) for item in progress_updates}
+        self.assertIn("正在生成研究问题", step_labels)
+        self.assertIn("正在获取来源", step_labels)
+        self.assertIn("正在解析证据", step_labels)
+        self.assertIn("正在生成结论", step_labels)
+        self.assertIn("正在生成最终报告", step_labels)
+
+        parsing_updates = [
+            item
+            for item in progress_updates
+            if item["current_step"] == "正在解析证据"
+            and int(item["step_total"]) > 1
+            and "正在处理来源" in str(item["message"])
+        ]
+        self.assertTrue(parsing_updates)
+        parsing_indexes = [int(item["step_progress"]) for item in parsing_updates]
+        self.assertEqual(parsing_indexes, sorted(parsing_indexes))
+        self.assertEqual(parsing_indexes[0], 1)
+        self.assertEqual(parsing_indexes[-1], int(parsing_updates[-1]["step_total"]))
+        self.assertIn("progress", result)
+        self.assertGreaterEqual(result["progress"].overall_progress, 1.0)
 
     def test_pipeline_early_stops_when_sources_are_insufficient(self) -> None:
         repository = InMemoryResearchRepository()

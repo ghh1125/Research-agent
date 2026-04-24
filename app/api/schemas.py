@@ -35,3 +35,4 @@ class ResearchResponse(BaseModel):
     financial_snapshot: FinancialSnapshot
     early_stop_reason: str | None = None
     report: ResearchReport
+    dashboard_view: dict[str, object]
