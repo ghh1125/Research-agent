@@ -502,23 +502,3 @@ data/research_logs/<task_id>.json
 ```text
 data/checkpoints/<task_id>.json
 ```
-
-## 11. Git 注意事项
-
-以下内容默认不会进入 Git：
-
-- `.env`
-- `.venv/`
-- `data/research_logs/`
-- `data/research_memory/`
-- `data/knowledge/`
-- `data/checkpoints/`
-- Python 缓存目录
-
-提交前建议检查：
-
-```bash
-git status --short
-git diff --check
-python -m pytest -q
-```
