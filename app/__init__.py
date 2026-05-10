@@ -1,1 +1,0 @@
-"""Research Agent application package."""

@@ -25,6 +25,10 @@ venv/
 logs/
 output/
 .cache/
+data/research_logs/
+data/research_memory/
+data/knowledge/
+data/checkpoints/
 
 # Keep example env file tracked
 !.env.example
