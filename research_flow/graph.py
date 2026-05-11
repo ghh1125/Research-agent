@@ -79,6 +79,7 @@ class ResearchGraph:
 
     def propagate(self, query: str, **task_options: Any) -> ResearchResult:
         trace: list[StageTrace] = []
+        memory_context: str = ""
 
         self._emit("[step 1/5] 任务理解与研究规划 start")
         self._emit("  - parsing ResearchTask")
@@ -88,8 +89,9 @@ class ResearchGraph:
             f"market={task.market} horizon={task.horizon} risk={task.risk_preference}"
         )
         self._resolve_memory_if_possible(task)
+        memory_context = self.memory_log.context_for(task.entity, limit=3) if task.entity else ""
         self._emit("  - generating ResearchPlan")
-        plan = self._build_plan(task)
+        plan = self._build_plan(task, memory_context=memory_context or None)
         self._emit(f"  - plan agents={','.join(plan.selected_agents)} data_sources={','.join(plan.data_sources)}")
         completed = self._checkpoint_completed(task.id)
         if self.config.resume_from_checkpoint and "报告输出、记忆复盘与持续跟踪" in completed:
@@ -184,7 +186,7 @@ class ResearchGraph:
             self._emit("  - loaded decision package from checkpoint")
         elif self.llm_client is not None:
             self._emit("  - Research Manager decision")
-            manager_decision = build_manager_decision_with_llm(task, analyst_reports, bull_case, bear_case, self.llm_client)
+            manager_decision = build_manager_decision_with_llm(task, analyst_reports, bull_case, bear_case, self.llm_client, memory_context=memory_context or None)
             self._emit("  - Valuation / Scenario analysis")
             scenario_analysis = build_scenario_analysis_with_llm(task, manager_decision, analyst_reports, self.llm_client, evidence_bundle)
             self._emit(f"  - Risk team debate rounds={self.config.max_risk_discuss_rounds}")
@@ -247,7 +249,7 @@ class ResearchGraph:
         report = build_report(provisional)
         self._emit("  - writing memory entry and tracking alerts")
         memory_entry = build_memory_entry(provisional)
-        alerts = build_tracking_alerts(manager_decision, portfolio_decision)
+        alerts = build_tracking_alerts(manager_decision, portfolio_decision, entity=task.entity)
         final_trace = [
             *trace,
             StageTrace(name="报告输出、记忆复盘与持续跟踪", summary=f"report_sections={len(report.sections)}; alerts={len(alerts)}"),
@@ -283,9 +285,9 @@ class ResearchGraph:
             return parse_task(query, **options)
         raise RuntimeError("LLM task parser is required but no LLM client is configured")
 
-    def _build_plan(self, task):
+    def _build_plan(self, task, *, memory_context: str | None = None):
         if self.llm_client is not None:
-            return build_research_plan_with_llm(task, self.llm_client, self.config.selected_agents)
+            return build_research_plan_with_llm(task, self.llm_client, self.config.selected_agents, memory_context=memory_context)
         if self.config.allow_heuristic_fallback:
             return build_research_plan(task, self.config.selected_agents)
         raise RuntimeError("LLM research planner is required but no LLM client is configured")

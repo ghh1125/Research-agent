@@ -4,7 +4,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 QuestionType = Literal[
     "single_stock_deep_dive",
@@ -145,6 +145,13 @@ class ScenarioAnalysis(BaseModel):
     valuation_methodologies: list[str] = Field(default_factory=list)
     scenario_table: list[dict[str, Any]] = Field(default_factory=list)
     computed_target_prices: dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("computed_target_prices", mode="before")
+    @classmethod
+    def _strip_none_prices(cls, v: Any) -> Any:
+        if isinstance(v, dict):
+            return {k: val for k, val in v.items() if isinstance(val, (int, float))}
+        return {} if v is None else v
 
 
 class RiskReview(BaseModel):

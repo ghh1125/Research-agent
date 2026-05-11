@@ -39,7 +39,20 @@ def build_manager_decision(task: ResearchTask, reports: list[AnalystReport], bul
     )
 
 
-def build_manager_decision_with_llm(task: ResearchTask, reports: list[AnalystReport], bull: DebateCase, bear: DebateCase, llm_client) -> ManagerDecision:
+def build_manager_decision_with_llm(
+    task: ResearchTask,
+    reports: list[AnalystReport],
+    bull: DebateCase,
+    bear: DebateCase,
+    llm_client,
+    *,
+    memory_context: str | None = None,
+) -> ManagerDecision:
+    memory_section = (
+        f"\n\n历史判断记忆（同一实体的历史评级与结论，请校准当前裁决避免重复旧错误）：\n{memory_context}"
+        if memory_context and memory_context.strip()
+        else ""
+    )
     prompt = f"""
 你是 Research Manager。请在多空辩论之后收敛成投研判断，不要给直接交易指令。
 必须输出：评级、核心逻辑、三个关键假设、最脆弱假设、置信度、variant perception、跟踪指标、验证路径。
@@ -51,7 +64,7 @@ Analyst reports:
 Bull:
 {bull.model_dump_json(ensure_ascii=False)}
 Bear:
-{bear.model_dump_json(ensure_ascii=False)}
+{bear.model_dump_json(ensure_ascii=False)}{memory_section}
 """.strip()
     return llm_client.complete_json(
         prompt,

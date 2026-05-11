@@ -27,6 +27,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+可选：安装 akshare 以获得更完整的 A 股数据（财务报表、行情）：
+
+```bash
+pip install akshare
+```
+
 复制环境变量模板：
 
 ```bash
@@ -124,13 +130,15 @@ python main.py "宁德时代还能买吗" --quiet --markdown
 
 系统会通过 `DataToolRegistry` 调用真实数据工具：
 
-- `market_data`：行情、价格、成交量、技术指标
-- `financial_statements`：利润表、资产负债表、现金流、关键财务指标
-- `filings`：公告、年报、季报、SEC 文件、A 股公告
+- `market_data`：行情、价格、成交量，以及内嵌计算的技术指标（MA20、MA60、RSI-14、52 周高低点、波动率）
+- `financial_statements`：利润表、资产负债表、现金流、关键财务指标；A 股市场额外支持 akshare 数据源
+- `filings`：公告、年报、季报；美股走 SEC EDGAR，A 股走巨潮（CNInfo），港股走港交所（HKEX）披露平台
 - `news`：新闻、事件、管理层动态、行业新闻
 - `macro`：利率、汇率、政策、周期、宏观数据
 - `industry`：行业格局、供需、产业链、竞争对手
-- `valuation`：估值倍数、可比公司、历史估值、情景估值输入
+- `valuation`：估值倍数（P/E、P/S、EV/EBITDA 等）以结构化 JSON 格式输出，支持三路径提取（证据字段名 → artifact JSON → 利润表 EPS 行），供情景估值模块直接使用
+
+**A 股数据增强**：安装 akshare 后自动启用两个额外工具（`AKShareMarketDataTool`、`AKShareFinancialStatementsTool`），提供 A 股近年完整行情和财务报表数据。未安装时自动回退，流程不中断。
 
 每次工具调用都会沉淀 artifact、metadata、来源链接和证据摘要，写入本地 knowledge directory，方便后续报告引用和复查。
 
@@ -160,7 +168,7 @@ python main.py "宁德时代还能买吗" --quiet --markdown
 - `Risk Debate`：aggressive、neutral、conservative 三种风控视角
 - `Portfolio Decision`：可买、观察、回避、减仓、可小仓位跟踪等组合语境建议
 
-估值模块会优先使用证据中抽取到的 EPS、P/E、Sales、P/S 等结构化指标做计算；证据不足时会在报告中明确数据缺口。
+估值模块使用三路径提取指标：①证据字段名匹配（16+ 种命名变体）→ ②直接解析 YFinanceValuationTool 输出的 JSON 段 → ③从利润表 CSV 提取 Diluted EPS 行；三路均失败时在报告中明确标注数据缺口。
 
 ### 5. 报告输出、记忆复盘与持续跟踪
 
@@ -178,7 +186,9 @@ python main.py "宁德时代还能买吗" --quiet --markdown
 - 数据来源
 - 下一步研究问题
 
-报告生成后，系统会把本次判断、当时价格、关键假设、后续跟踪项写入本地记忆。后续再次运行同一标的时，会先读取历史记忆，并尝试复盘前次判断是否被新事实证伪。
+报告生成后，系统会把本次判断、当时价格、关键假设、后续跟踪项写入本地记忆。后续再次运行同一标的时，会先读取历史记忆，注入研究规划阶段和研究经理决策阶段，用于校准当前假设、避免重复旧错误，并尝试复盘前次判断是否被新事实证伪。
+
+跟踪警报系统会基于每次研究结论自动生成实体特定的跟踪项，包括：财报复盘、价格触发、脆弱假设监控，以及由研究经理从报告中提炼的核心指标变动警报。
 
 ## 4. main.py 参数说明
 
@@ -406,15 +416,27 @@ python main.py "研究某公司最新年报和公告中的风险因素" \
 ```text
 main.py
 research_flow/
-  graph.py                 # 五层工作流编排
-  schema.py                # ResearchTask、ResearchPlan、ResearchResult 等核心 schema
-  llm.py                   # OpenAI-compatible LLM Provider 路由
-  understanding/           # 任务解析和研究计划
-  evidence/                # DataToolRegistry、搜索、公告、财报、知识库沉淀
+  graph.py                 # 五层工作流编排，memory_context 贯穿规划和裁决阶段
+  schema.py                # 核心 Pydantic schema（ResearchTask、ScenarioAnalysis 等）
+  llm.py                   # OpenAI-compatible LLM Provider 路由（DashScope/OpenAI/OpenRouter/DeepSeek）
+  understanding/           # 任务解析和研究计划，支持历史记忆注入
+  evidence/
+    tools.py               # 8 个原生数据工具：yfinance 行情+技术指标、yfinance 财务报表、
+                           # yfinance 估值指标、akshare A股行情（可选）、akshare A股财报（可选）、
+                           # CNInfo A股公告、SEC EDGAR 美股公告、HKEX 港股公告
+    registry.py            # DataToolRegistry，原生工具优先 + 搜索兜底
+    search.py              # 多 Search Provider 路由（Tavily/Serper/Google）
+    knowledge.py           # 证据链沉淀
   analysis/                # 多 Agent 专项分析和 Bull/Bear 辩论
-  decision/                # Research Manager、风险辩论、Portfolio Manager
-  valuation/               # base/bull/bear 三情景估值
-  continuity/              # 报告、记忆、复盘、持续跟踪、checkpoint
+  decision/
+    synthesis.py           # Research Manager、ScenarioAnalysis、风险辩论、Portfolio Manager
+  valuation/
+    models.py              # 三路径估值指标提取 + base/bull/bear 情景计算
+  continuity/
+    watchlist.py           # 实体绑定的跟踪警报生成
+    memory.py              # 记忆读写和 P&L 复盘
+    report.py              # 机构化报告渲染
+    checkpoint.py          # 阶段断点读写
 tests/
   test_main_flow.py
   test_research_flow_contracts.py
@@ -479,7 +501,13 @@ AllocationQuota.FreeTierOnly
 possibly delisted; no price data found
 ```
 
-这通常是数据源覆盖问题。流程仍会继续使用公告、新闻、行业、宏观、估值等证据；但当时价格和部分技术指标会缺失。可以通过更多官方公告、搜索资料或后续接入本地行情源改善。
+这通常是数据源覆盖问题。推荐安装 akshare 作为补充：
+
+```bash
+pip install akshare
+```
+
+安装后 `AKShareMarketDataTool` 和 `AKShareFinancialStatementsTool` 会自动启用，提供 A 股近年完整行情和财务数据，大幅改善证据覆盖。未安装时流程仍会继续，但 A 股财务指标会有缺失。
 
 ### 运行很慢
 

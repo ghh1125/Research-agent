@@ -3,3 +3,4 @@ pytest>=8.3.0
 openai>=1.75.0
 pypdf>=6.0.0
 yfinance>=0.2.66
+# akshare>=1.16.0  # optional: A-share market data and financial statements

@@ -74,7 +74,18 @@ required_data_sources_by_agent = lambda agents: {agent: AGENT_SOURCES[agent] for
 select_agents_for_task = select_agents
 
 
-def build_research_plan_with_llm(task: ResearchTask, llm_client, selected_agents: list[str] | None = None) -> ResearchPlan:
+def build_research_plan_with_llm(
+    task: ResearchTask,
+    llm_client,
+    selected_agents: list[str] | None = None,
+    *,
+    memory_context: str | None = None,
+) -> ResearchPlan:
+    memory_section = (
+        f"\n\n历史研究记忆（同一实体的过往判断，请据此校准当前假设和研究优先级）：\n{memory_context}"
+        if memory_context and memory_context.strip()
+        else ""
+    )
     prompt = f"""
 你是投研研究计划生成器。根据标准化 ResearchTask 生成 research plan。
 计划必须明确：
@@ -89,7 +100,7 @@ ResearchTask:
 {task.model_dump_json(ensure_ascii=False)}
 
 用户指定 selected_agents:
-{selected_agents}
+{selected_agents}{memory_section}
 """.strip()
     plan = llm_client.complete_json(
         prompt,
