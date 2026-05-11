@@ -458,31 +458,37 @@ python main.py "研究某公司最新年报和公告中的风险因素" \
 ```text
 main.py
 research_flow/
-  graph.py                 # 五层工作流编排，memory_context 贯穿规划和裁决阶段
-  schema.py                # 核心 Pydantic schema（ResearchTask、ScenarioAnalysis 等）
-  llm.py                   # OpenAI-compatible LLM Provider 路由（DashScope/OpenAI/OpenRouter/DeepSeek）
-  understanding/           # 任务解析和研究计划，支持历史记忆注入
-  evidence/
-    tools.py               # 8 个原生数据工具：yfinance 行情+技术指标、yfinance 财务报表、
-                           # yfinance 估值指标、akshare A股行情（可选）、akshare A股财报（可选）、
-                           # CNInfo A股公告、SEC EDGAR 美股公告、HKEX 港股公告
-    registry.py            # DataToolRegistry，原生工具优先 + 搜索兜底
-    search.py              # 多 Search Provider 路由（Tavily/Serper/Google）
-    knowledge.py           # 证据链沉淀
-  analysis/                # 多 Agent 专项分析和 Bull/Bear 辩论
-  decision/
-    synthesis.py           # Research Manager、ScenarioAnalysis、风险辩论、Portfolio Manager
-  valuation/
-    models.py              # 三路径估值指标提取 + base/bull/bear 情景计算
-  continuity/
-    watchlist.py           # 实体绑定的跟踪警报生成
-    memory.py              # 记忆读写和 P&L 复盘
-    report.py              # 机构化报告渲染
-    checkpoint.py          # 阶段断点读写
+├── graph.py                 # 五层工作流编排，memory_context 贯穿规划和裁决阶段
+├── schema.py                # 核心 Pydantic schema（ResearchTask、ScenarioAnalysis 等）
+├── llm.py                   # OpenAI-compatible LLM Provider 路由（DashScope/OpenAI/OpenRouter/DeepSeek）
+├── understanding/           # 任务解析和研究计划，支持历史记忆注入
+├── evidence/
+│   ├── tools.py             # 8 个原生数据工具：
+│   │                        # - yfinance 行情 + 技术指标
+│   │                        # - yfinance 财务报表
+│   │                        # - yfinance 估值指标
+│   │                        # - akshare A股行情（可选）
+│   │                        # - akshare A股财报（可选）
+│   │                        # - CNInfo A股公告
+│   │                        # - SEC EDGAR 美股公告
+│   │                        # - HKEX 港股公告
+│   ├── registry.py          # DataToolRegistry，原生工具优先 + 搜索兜底
+│   ├── search.py            # 多 Search Provider 路由（Tavily/Serper/Google）
+│   └── knowledge.py         # 证据链沉淀
+├── analysis/                # 多 Agent 专项分析和 Bull/Bear 辩论
+├── decision/
+│   └── synthesis.py         # Research Manager、ScenarioAnalysis、风险辩论、Portfolio Manager
+├── valuation/
+│   └── models.py            # 三路径估值指标提取 + base/bull/bear 情景计算
+├── continuity/
+│   ├── watchlist.py         # 实体绑定的跟踪警报生成
+│   ├── memory.py            # 记忆读写和 P&L 复盘
+│   ├── report.py            # 机构化报告渲染
+│   └── checkpoint.py        # 阶段断点读写
 tests/
-  test_main_flow.py
-  test_research_flow_contracts.py
-  test_equivalence_extensions.py
+├── test_main_flow.py
+├── test_research_flow_contracts.py
+└── test_equivalence_extensions.py
 ```
 
 ## 9. 测试
