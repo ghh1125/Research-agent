@@ -303,6 +303,8 @@ python main.py --help
 
 对应 `src/nodes/due_diligence/__init__.py` 里的 `summarize_team`/`summarize_business`/`summarize_financial` 等摘要函数，由 `pipeline.py`/`app.py` 在调用顺序里组装成 `peer_findings` 字符串传给下游 agent。
 
+5 份报告全部跑完后，`build_due_diligence_bundle()` 再做一次纯数据汇总（不调 LLM）：把所有风险按严重度（高/中/低）排序成统一的风险清单，把 5 份报告各自的引用来源去重合并，渲染成第 6 份报告"深度尽调汇总"。
+
 ---
 
 ## 5. 代码结构
@@ -317,7 +319,7 @@ src/
   files.py                       # BP/财务文件解析（pdf/docx/pptx/xlsx）+ 上传文件落盘
   report.py                      # markdown 渲染 + docx 导出（每个节点共用）
   schema.py                      # 7 个节点的全部 Pydantic 模型 + NodeMeta 公共信封
-  pipeline.py                    # BPPipeline：拆成两段式方法跑 7 个节点，写报告文件
+  pipeline.py                    # BPPipeline：每个节点拆成独立方法，写报告文件
   nodes/
     start.py
     project_overview.py
@@ -337,7 +339,10 @@ tests/
   test_cli.py
 ```
 
-`BPPipeline` 把 7 个节点拆成两段：`run_intake_through_discovery()`（节点 0/1/2/3.1，跑到竞品发现就停）和 `run_after_competitor_selection()`（节点 3.2/4/5/6，竞品确认后继续）。CLI 的 `run()` 把两段接起来一次性跑完；Streamlit 网页端则在两段之间插入人工确认页面，这样同一套节点逻辑既能支持命令行交互式确认，也能支持网页多次请求间暂停确认，不需要写两套业务逻辑。
+`BPPipeline` 把每个节点拆成独立的单步方法（`run_start_step` / `run_project_overview_step` / `run_industry_analysis_step` / `run_competitor_discovery_step` / `run_after_competitor_selection`），调用方自己决定要不要在某一步后面停下来等人工操作——这样同一套节点逻辑既能支持 CLI 的阻塞式终端交互，也能支持 Streamlit 跨多次页面请求的暂停确认，不需要写两套业务逻辑：
+
+- `run_project_overview_step` / `run_industry_analysis_step` 都接受一个可选的 `feedback` 参数，传了就把这条反馈带进 prompt 重新生成；外面还各包一层 `*_with_review`（接受 `ReviewCallback`：返回 `None` 表示通过、返回字符串表示反馈内容）方便 CLI 写"循环直到通过"的阻塞式交互
+- `run_intake_through_discovery()` / `run()` 是为了不强制每个调用方都写完整的逐步调用而保留的便捷封装，默认不传 review callback 就是无人值守直接跑完，CLI 和 Streamlit 都是在这些封装之上各自接自己的交互逻辑
 
 ---
 
@@ -388,3 +393,6 @@ python -m compileall src main.py app.py tests
 
 **运行很慢？**
 主要耗时在 LLM 调用和搜索请求上，可以调小 `--search-max-results`（CLI）减少每类检索的结果数。
+
+**CLI 跑起来要我确认好几次，能不能一次跑到底？**
+可以，加 `--auto-approve-reports --auto-select-competitors` 跳过全部 3 个人工节点（项目概况复核、行业分析复核、竞品确认），适合批量跑/CI 场景。
