@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
 from src.report import render_meta_section
-from src.schema import IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, TechIPDueDiligence
+from src.schema import IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, RiskNote, TechIPDueDiligence
 
 _PROMPT = """\
 你在做一级市场投资项目的"技术与知识产权尽调"。
@@ -26,7 +26,7 @@ _PROMPT = """\
 1. architecture_review：技术架构评审
 2. rd_team_assessment：研发团队评估（如果团队尽调认为团队能力偏弱，结合判断研发团队是否同样存在能力缺口）
 3. core_tech_barrier：核心技术壁垒（结合行业竞争格局判断这个壁垒是否足够构成优势；如果资料中提到专利/软著/商标等知识产权资产，作为壁垒的一部分在这里说明，没有就写"资料不足"）
-4. risk_notes：技术与知识产权相关风险提示
+4. risk_notes：技术与知识产权相关风险提示，每条给出 description 和 severity（"低"/"中"/"高"，按对投资判断的实际影响程度给，不要统一给同一个等级）
 
 没有依据的内容写"资料不足"，不要编造专利号或具体技术细节。
 """
@@ -36,7 +36,7 @@ class _TechIPLLM(BaseModel):
     architecture_review: str
     rd_team_assessment: str
     core_tech_barrier: str
-    risk_notes: list[str] = Field(default_factory=list)
+    risk_notes: list[RiskNote] = Field(default_factory=list)
     meta: NodeMetaJudgment = Field(default_factory=NodeMetaJudgment)
 
 
@@ -69,7 +69,7 @@ def run_tech_ip_due_diligence(
     )
 
     meta = result.meta.to_meta([])
-    risk_lines = "\n".join(f"- {r}" for r in result.risk_notes) or "- 无明显风险提示"
+    risk_lines = "\n".join(f"- [{r.severity}] {r.description}" for r in result.risk_notes) or "- 无明显风险提示"
     markdown = f"""# 技术与知识产权尽调报告
 
 ## 1. 技术架构评审

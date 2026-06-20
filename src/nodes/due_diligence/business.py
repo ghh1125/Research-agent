@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
 from src.report import render_meta_section
-from src.schema import BusinessDueDiligence, BusinessScore, CompetitorAnalysis, IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview
+from src.schema import BusinessDueDiligence, BusinessScore, CompetitorAnalysis, IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, RiskNote
 
 _PROMPT = """\
 你在做一级市场投资项目的"业务尽调"。
@@ -33,7 +33,7 @@ _PROMPT = """\
 2. market_analysis：市场分析（结合行业市场规模与增长驱动判断业务所处赛道是否处于上升期）
 3. growth_model：增长模型
 4. competitive_landscape_analysis：结合竞品定位判断的竞争格局分析
-5. risk_notes：业务风险提示列表（如果团队尽调发现的关键人风险会影响业务可持续性，在这里体现）
+5. risk_notes：业务风险提示列表，每条给出 description（如果团队尽调发现的关键人风险会影响业务可持续性，在这里体现）和 severity（"低"/"中"/"高"，按对业务可持续性的实际影响程度判断，不要统一给同一个等级）
 6. business_score：业务评分，只能是"优"/"良"/"中"/"差"
 
 没有依据的内容写"资料不足"，不要编造具体的增长数字。
@@ -45,7 +45,7 @@ class _BusinessLLM(BaseModel):
     market_analysis: str
     growth_model: str
     competitive_landscape_analysis: str
-    risk_notes: list[str] = Field(default_factory=list)
+    risk_notes: list[RiskNote] = Field(default_factory=list)
     business_score: BusinessScore
     meta: NodeMetaJudgment = Field(default_factory=NodeMetaJudgment)
 
@@ -82,7 +82,7 @@ def run_business_due_diligence(
     )
 
     meta = result.meta.to_meta([])
-    risk_lines = "\n".join(f"- {r}" for r in result.risk_notes) or "- 无明显风险提示"
+    risk_lines = "\n".join(f"- [{r.severity}] {r.description}" for r in result.risk_notes) or "- 无明显风险提示"
     markdown = f"""# 业务尽调报告
 
 ## 1. 商业模式分析

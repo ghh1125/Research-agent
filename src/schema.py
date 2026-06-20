@@ -177,12 +177,17 @@ class TeamDueDiligence(BaseModel):
     meta: NodeMeta = Field(default_factory=NodeMeta)
 
 
+class RiskNote(BaseModel):
+    description: str
+    severity: RiskLevel
+
+
 class BusinessDueDiligence(BaseModel):
     business_model_analysis: str
     market_analysis: str
     growth_model: str
     competitive_landscape_analysis: str
-    risk_notes: list[str] = Field(default_factory=list)
+    risk_notes: list[RiskNote] = Field(default_factory=list)
     business_score: BusinessScore
     markdown: str = ""
     meta: NodeMeta = Field(default_factory=NodeMeta)
@@ -205,7 +210,7 @@ class FinancialDueDiligence(BaseModel):
     cash_flow_health: str
     financial_health_summary: str
     ratios: FinancialRatios = Field(default_factory=FinancialRatios)
-    risk_notes: list[str] = Field(default_factory=list)
+    risk_notes: list[RiskNote] = Field(default_factory=list)
     markdown: str = ""
     meta: NodeMeta = Field(default_factory=NodeMeta)
 
@@ -214,7 +219,7 @@ class TechIPDueDiligence(BaseModel):
     architecture_review: str
     rd_team_assessment: str
     core_tech_barrier: str
-    risk_notes: list[str] = Field(default_factory=list)
+    risk_notes: list[RiskNote] = Field(default_factory=list)
     markdown: str = ""
     meta: NodeMeta = Field(default_factory=NodeMeta)
 

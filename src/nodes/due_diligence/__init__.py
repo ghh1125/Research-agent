@@ -24,15 +24,15 @@ def summarize_team(team: TeamDueDiligence) -> str:
 
 
 def summarize_business(business: BusinessDueDiligence) -> str:
-    return f"[业务尽调] 评分={business.business_score}；风险：{'；'.join(business.risk_notes) or '无'}"
+    return f"[业务尽调] 评分={business.business_score}；风险：{'；'.join(r.description for r in business.risk_notes) or '无'}"
 
 
 def summarize_financial(financial: FinancialDueDiligence) -> str:
-    return f"[财务尽调] 健康度：{financial.financial_health_summary}；风险：{'；'.join(financial.risk_notes) or '无'}"
+    return f"[财务尽调] 健康度：{financial.financial_health_summary}；风险：{'；'.join(r.description for r in financial.risk_notes) or '无'}"
 
 
 def summarize_tech_ip(tech_ip: TechIPDueDiligence) -> str:
-    return f"[技术与知识产权尽调] 核心壁垒：{tech_ip.core_tech_barrier}；风险：{'；'.join(tech_ip.risk_notes) or '无'}"
+    return f"[技术与知识产权尽调] 核心壁垒：{tech_ip.core_tech_barrier}；风险：{'；'.join(r.description for r in tech_ip.risk_notes) or '无'}"
 
 
 def summarize_legal(legal: LegalDueDiligence) -> str:
@@ -51,11 +51,11 @@ def build_due_diligence_bundle(
     risk_register: list[RiskRegisterItem] = []
     risk_register.append(RiskRegisterItem(category="团队", description=team.key_person_risk, severity=_team_severity(team.capability_rating)))
     for note in business.risk_notes:
-        risk_register.append(RiskRegisterItem(category="业务", description=note, severity="中"))
+        risk_register.append(RiskRegisterItem(category="业务", description=note.description, severity=note.severity))
     for note in financial.risk_notes:
-        risk_register.append(RiskRegisterItem(category="财务", description=note, severity="中"))
+        risk_register.append(RiskRegisterItem(category="财务", description=note.description, severity=note.severity))
     for note in tech_ip.risk_notes:
-        risk_register.append(RiskRegisterItem(category="技术与知识产权", description=note, severity="中"))
+        risk_register.append(RiskRegisterItem(category="技术与知识产权", description=note.description, severity=note.severity))
     for note in legal.risk_notes:
         risk_register.append(RiskRegisterItem(category="法律", description=note, severity=legal.legal_risk_level))
     risk_register.sort(key=lambda item: _SEVERITY_ORDER.get(item.severity, 1))

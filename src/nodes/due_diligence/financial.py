@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
 from src.report import render_meta_section
-from src.schema import FinancialDueDiligence, FinancialRatios, IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview
+from src.schema import FinancialDueDiligence, FinancialRatios, IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, RiskNote
 
 _KEYWORDS: dict[str, list[str]] = {
     "revenue": ["营业收入", "营业总收入", "营收"],
@@ -43,7 +43,7 @@ _PROMPT = """\
 3. unit_economics：经济模型/单位经济性解读
 4. cash_flow_health：现金流健康度解读
 5. financial_health_summary：财务健康度总结
-6. risk_notes：财务风险提示列表（例如"数据未覆盖完整报告期""毛利率低于行业惯常水平"等，可结合行业市场规模与增长驱动判断）
+6. risk_notes：财务风险提示列表，每条给出 description 和 severity（"低"/"中"/"高"，按对投资判断的实际影响程度给，不要统一给同一个等级；例如"数据未覆盖完整报告期"通常severity较低，"经营现金流持续为负"severity较高）
 
 如果上面的比率字段是 None/空，必须在 missing_info 里说明"未能从上传文件中提取到对应财务数据"，不要假设具体数值。
 """
@@ -55,7 +55,7 @@ class _FinancialLLM(BaseModel):
     unit_economics: str
     cash_flow_health: str
     financial_health_summary: str
-    risk_notes: list[str] = Field(default_factory=list)
+    risk_notes: list[RiskNote] = Field(default_factory=list)
     meta: NodeMetaJudgment = Field(default_factory=NodeMetaJudgment)
 
 
@@ -173,7 +173,7 @@ def run_financial_due_diligence(
     )
 
     meta = result.meta.to_meta([])
-    risk_lines = "\n".join(f"- {r}" for r in result.risk_notes) or "- 无明显风险提示"
+    risk_lines = "\n".join(f"- [{r.severity}] {r.description}" for r in result.risk_notes) or "- 无明显风险提示"
     markdown = f"""# 财务尽调报告
 
 ## 1. 收入结构
