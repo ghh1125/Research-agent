@@ -30,6 +30,8 @@ _PROMPT = """\
 9. key_assumptions：本次分析依赖的关键假设列表
 
 只用检索结果和常识支持的内容下结论；没有数据支撑的市场规模数字要在 missing_info 里注明，不要编造具体数字。
+
+{feedback_section}
 """
 
 
@@ -53,8 +55,10 @@ def run_industry_analysis(
     llm_client: RealLLMClient | None = None,
     search_client: RealSearchClient | None = None,
     search_max_results: int = 5,
+    feedback: str | None = None,
 ) -> IndustryAnalysis:
-    """Node 2 — 行业深度分析."""
+    """Node 2 — 行业深度分析. `feedback` carries a human reviewer's correction request for a
+    regeneration pass; omit it for the first pass."""
 
     search_client = search_client or RealSearchClient()
     industry = project_input.industry or "未提供"
@@ -66,6 +70,8 @@ def run_industry_analysis(
     ]
     search_text, sources = collect_evidence(search_client, queries, category="industry", max_results=search_max_results)
 
+    feedback_section = f"人工复核反馈（这是对上一版本的修改要求，必须按这个反馈调整，不要忽略）：\n{feedback}" if feedback else ""
+
     client = llm_client or RealLLMClient()
     result = client.complete_json(
         _PROMPT.format(
@@ -74,6 +80,7 @@ def run_industry_analysis(
             core_business=project_overview.core_business,
             product_and_scene=project_overview.use_cases_and_value,
             search_text=search_text[:7000] or "(无检索结果)",
+            feedback_section=feedback_section,
         ),
         _IndustryAnalysisLLM,
     )

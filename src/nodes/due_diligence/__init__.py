@@ -61,8 +61,16 @@ def build_due_diligence_bundle(
     risk_register.sort(key=lambda item: _SEVERITY_ORDER.get(item.severity, 1))
 
     evidence_index: list[Source] = []
+    seen_sources: set[tuple[str, str | None]] = set()
     for report in (team, business, financial, tech_ip, legal):
-        evidence_index.extend(report.meta.sources)
+        for source in report.meta.sources:
+            key = (source.title, source.url)
+            if key in seen_sources:
+                continue
+            seen_sources.add(key)
+            evidence_index.append(source)
+
+    markdown = _render_bundle_markdown(team, business, financial, tech_ip, legal, risk_register, evidence_index)
 
     return DueDiligenceBundle(
         team=team,
@@ -72,11 +80,45 @@ def build_due_diligence_bundle(
         legal=legal,
         risk_register=risk_register,
         evidence_index=evidence_index,
+        markdown=markdown,
     )
 
 
 def _team_severity(capability_rating: str) -> str:
     return {"强": "低", "中": "中", "弱": "高"}.get(capability_rating, "中")
+
+
+def _render_bundle_markdown(team, business, financial, tech_ip, legal, risk_register: list[RiskRegisterItem], evidence_index: list[Source]) -> str:
+    """Deterministic汇总 render — no LLM call, purely re-presents data already produced by the 5
+    sub-reports so the 深度尽调 aggregation step is a visible report, not just an internal data structure."""
+
+    severity_counts = {"高": 0, "中": 0, "低": 0}
+    for item in risk_register:
+        severity_counts[item.severity] = severity_counts.get(item.severity, 0) + 1
+
+    risk_lines = "\n".join(f"- [{item.severity}] [{item.category}] {item.description}" for item in risk_register) or "- 无"
+    evidence_lines = "\n".join(f"- {s.title}{f'（{s.provider}）' if s.provider else ''}{f' {s.url}' if s.url else ''}" for s in evidence_index) or "- 无"
+
+    return f"""# 深度尽调汇总报告
+
+## 1. 各维度结论速览
+- {summarize_team(team)}
+- {summarize_business(business)}
+- {summarize_financial(financial)}
+- {summarize_tech_ip(tech_ip)}
+- {summarize_legal(legal)}
+
+## 2. 风险统计
+- 高风险：{severity_counts['高']} 项
+- 中风险：{severity_counts['中']} 项
+- 低风险：{severity_counts['低']} 项
+
+## 3. 风险清单（按严重度排序）
+{risk_lines}
+
+## 4. 证据来源汇总（去重后，共 {len(evidence_index)} 条）
+{evidence_lines}
+"""
 
 
 __all__ = [

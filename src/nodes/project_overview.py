@@ -33,6 +33,8 @@ BP/补充材料解析文本（节选）：
 
 严格区分"公开事实"（必须能在材料或检索结果中找到依据）和"合理推断"（基于产品/商业模式归纳）。
 找不到依据的内容要明确写"未公开"或加入 missing_info，不要编造。
+
+{feedback_section}
 """
 
 
@@ -54,8 +56,10 @@ def run_project_overview(
     llm_client: RealLLMClient | None = None,
     search_client: RealSearchClient | None = None,
     search_max_results: int = 5,
+    feedback: str | None = None,
 ) -> ProjectOverview:
-    """Node 1 — 项目基本概况."""
+    """Node 1 — 项目基本概况. `feedback` carries a human reviewer's correction request for a
+    regeneration pass (e.g. "公司注册信息那段写错了，再确认一下"); omit it for the first pass."""
 
     search_client = search_client or RealSearchClient()
     queries = [f"{project_input.company_name} 公司简介 工商信息"]
@@ -64,6 +68,8 @@ def run_project_overview(
     queries.append(f"{project_input.company_name} 创始人 团队")
     queries.append(f"{project_input.company_name} 融资 历程")
     search_text, sources = collect_evidence(search_client, queries, category="project_overview", max_results=search_max_results)
+
+    feedback_section = f"人工复核反馈（这是对上一版本的修改要求，必须按这个反馈调整，不要忽略）：\n{feedback}" if feedback else ""
 
     client = llm_client or RealLLMClient()
     result = client.complete_json(
@@ -74,6 +80,7 @@ def run_project_overview(
             project_description=project_input.project_description or "未提供",
             bp_text=project_input.bp_parsed_content[:4000] or "(无)",
             search_text=search_text[:6000] or "(无检索结果)",
+            feedback_section=feedback_section,
         ),
         _ProjectOverviewLLM,
     )

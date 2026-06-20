@@ -40,6 +40,9 @@ from src.schema import (
 from src.search import RealSearchClient
 
 CompetitorSelector = Callable[[CompetitorDiscovery], list[str]]
+# Given the freshly generated report, return None to approve/continue, or a feedback string to
+# regenerate that same step with the feedback folded into the prompt.
+ReviewCallback = Callable[[Any], "str | None"]
 
 
 def select_all_competitors(discovery: CompetitorDiscovery) -> list[str]:
@@ -95,7 +98,7 @@ class BPPipeline:
         self.llm_client = llm_client or RealLLMClient(progress_callback=self._emit)
         self.search_client = search_client or RealSearchClient()
 
-    def run_intake_through_discovery(
+    def run_start_step(
         self,
         *,
         company_name: str,
@@ -105,8 +108,8 @@ class BPPipeline:
         funding_amount: str | None = None,
         industry: str | None = None,
         project_description: str | None = None,
-    ) -> tuple[ProjectInput, ProjectOverview, IndustryAnalysis, CompetitorDiscovery]:
-        """Runs nodes 0, 1, 2, 3.1 — everything before the 竞品发现 human confirmation point."""
+    ) -> ProjectInput:
+        """Node 0 — 开始. No review checkpoint after this one (it's just intake normalization)."""
 
         self._emit("[node 0/7] 开始 start")
         project_input = run_start(
@@ -120,25 +123,105 @@ class BPPipeline:
             llm_client=self.llm_client,
         )
         self._emit("[node 0/7] 开始 done")
+        return project_input
 
-        self._emit("[node 1/7] 项目基本概况 start")
-        project_overview = run_project_overview(
-            project_input, llm_client=self.llm_client, search_client=self.search_client, search_max_results=self.config.search_max_results
+    def run_project_overview_step(self, project_input: ProjectInput, *, feedback: str | None = None) -> ProjectOverview:
+        """Node 1 — 项目基本概况. Pass `feedback` to regenerate after a human review rejects the first pass."""
+
+        self._emit("[node 1/7] 项目基本概况 start" + (" (按反馈重新生成)" if feedback else ""))
+        overview = run_project_overview(
+            project_input, llm_client=self.llm_client, search_client=self.search_client, search_max_results=self.config.search_max_results, feedback=feedback
         )
         self._emit("[node 1/7] 项目基本概况 done")
+        return overview
 
-        self._emit("[node 2/7] 行业深度分析 start")
-        industry_analysis = run_industry_analysis(
-            project_input, project_overview, llm_client=self.llm_client, search_client=self.search_client, search_max_results=self.config.search_max_results
+    def run_project_overview_with_review(
+        self, project_input: ProjectInput, *, review_callback: ReviewCallback | None = None
+    ) -> ProjectOverview:
+        """CLI-style convenience: loops `run_project_overview_step` until `review_callback` approves
+        (returns None) or there is no callback at all (auto-approve, used by non-interactive callers)."""
+
+        feedback: str | None = None
+        while True:
+            overview = self.run_project_overview_step(project_input, feedback=feedback)
+            if review_callback is None:
+                return overview
+            feedback = review_callback(overview)
+            if feedback is None:
+                return overview
+
+    def run_industry_analysis_step(
+        self, project_input: ProjectInput, project_overview: ProjectOverview, *, feedback: str | None = None
+    ) -> IndustryAnalysis:
+        """Node 2 — 行业深度分析. Pass `feedback` to regenerate after a human review rejects the first pass."""
+
+        self._emit("[node 2/7] 行业深度分析 start" + (" (按反馈重新生成)" if feedback else ""))
+        analysis = run_industry_analysis(
+            project_input,
+            project_overview,
+            llm_client=self.llm_client,
+            search_client=self.search_client,
+            search_max_results=self.config.search_max_results,
+            feedback=feedback,
         )
         self._emit("[node 2/7] 行业深度分析 done")
+        return analysis
+
+    def run_industry_analysis_with_review(
+        self, project_input: ProjectInput, project_overview: ProjectOverview, *, review_callback: ReviewCallback | None = None
+    ) -> IndustryAnalysis:
+        """CLI-style convenience: loops `run_industry_analysis_step` until approved (see
+        `run_project_overview_with_review` for the same pattern)."""
+
+        feedback: str | None = None
+        while True:
+            analysis = self.run_industry_analysis_step(project_input, project_overview, feedback=feedback)
+            if review_callback is None:
+                return analysis
+            feedback = review_callback(analysis)
+            if feedback is None:
+                return analysis
+
+    def run_competitor_discovery_step(
+        self, project_input: ProjectInput, project_overview: ProjectOverview, industry_analysis: IndustryAnalysis
+    ) -> CompetitorDiscovery:
+        """Node 3.1 — 竞品发现 (longlist, before the 竞品确认 human-in-the-loop point)."""
 
         self._emit("[node 3.1/7] 竞品发现 start")
         discovery = run_competitor_discovery(
             project_input, project_overview, industry_analysis, llm_client=self.llm_client, search_client=self.search_client, search_max_results=self.config.search_max_results
         )
         self._emit(f"[node 3.1/7] 竞品发现 done candidates={len(discovery.candidates)}")
+        return discovery
 
+    def run_intake_through_discovery(
+        self,
+        *,
+        company_name: str,
+        website: str | None = None,
+        bp_files: list[str] | None = None,
+        funding_round: str | None = None,
+        funding_amount: str | None = None,
+        industry: str | None = None,
+        project_description: str | None = None,
+        overview_review_callback: ReviewCallback | None = None,
+        industry_review_callback: ReviewCallback | None = None,
+    ) -> tuple[ProjectInput, ProjectOverview, IndustryAnalysis, CompetitorDiscovery]:
+        """Convenience wrapper chaining nodes 0, 1, 2, 3.1 with optional review loops on 1 and 2.
+        Pass review_callback=None (the default) to auto-approve and run straight through."""
+
+        project_input = self.run_start_step(
+            company_name=company_name,
+            website=website,
+            bp_files=bp_files,
+            funding_round=funding_round,
+            funding_amount=funding_amount,
+            industry=industry,
+            project_description=project_description,
+        )
+        project_overview = self.run_project_overview_with_review(project_input, review_callback=overview_review_callback)
+        industry_analysis = self.run_industry_analysis_with_review(project_input, project_overview, review_callback=industry_review_callback)
+        discovery = self.run_competitor_discovery_step(project_input, project_overview, industry_analysis)
         return project_input, project_overview, industry_analysis, discovery
 
     def run_after_competitor_selection(
@@ -232,9 +315,12 @@ class BPPipeline:
         tech_ip_files: list[str] | None = None,
         legal_files: list[str] | None = None,
         competitor_selector: CompetitorSelector | None = None,
+        overview_review_callback: ReviewCallback | None = None,
+        industry_review_callback: ReviewCallback | None = None,
     ) -> PipelineState:
         """Single-shot convenience wrapper used by the CLI: runs both phases back to back and writes
-        every node's report to self.config.output_dir."""
+        every node's report to self.config.output_dir. overview_review_callback/industry_review_callback
+        default to None (auto-approve, no pause) so non-interactive callers are unaffected."""
 
         out = self.config.output_dir
         competitor_selector = competitor_selector or select_all_competitors
@@ -247,6 +333,8 @@ class BPPipeline:
             funding_amount=funding_amount,
             industry=industry,
             project_description=project_description,
+            overview_review_callback=overview_review_callback,
+            industry_review_callback=industry_review_callback,
         )
         self._write(out / "00_start", "project_input", project_input.model_dump_json(indent=2))
         write_node_report(project_overview.markdown, out / "01_project_overview", "report")
@@ -276,6 +364,7 @@ class BPPipeline:
             ("legal", due_diligence.legal),
         ):
             write_node_report(report.markdown, out / "04_due_diligence", name)
+        write_node_report(due_diligence.markdown, out / "04_due_diligence", "summary")
         write_node_report(valuation_analysis.markdown, out / "05_valuation", "report")
         write_node_report(final_report.markdown, out / "06_final_report", "report")
 
@@ -300,4 +389,4 @@ class BPPipeline:
             self.progress_callback(message)
 
 
-__all__ = ["BPPipeline", "BPPipelineConfig", "select_all_competitors", "empty_competitor_analysis", "CompetitorSelector"]
+__all__ = ["BPPipeline", "BPPipelineConfig", "select_all_competitors", "empty_competitor_analysis", "CompetitorSelector", "ReviewCallback"]

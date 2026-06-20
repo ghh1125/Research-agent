@@ -32,6 +32,17 @@ def _auto_competitor_selector(max_competitors: int) -> object:
     return _selector
 
 
+def _interactive_review_callback(step_label: str):
+    def _callback(report) -> str | None:
+        print(f"\n----- {step_label}生成结果 -----", file=sys.stderr)
+        print(report.markdown, file=sys.stderr)
+        print(f"----- {step_label}结果结束 -----", file=sys.stderr)
+        raw = input("没问题直接回车继续；要修改就输入反馈文字后回车（会按反馈重新生成这一步）：").strip()
+        return raw or None
+
+    return _callback
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the 7-node VC due-diligence pipeline (BP evaluation).")
     parser.add_argument("company_name", help="目标公司名称")
@@ -48,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--legal-file", dest="legal_files", action="append", default=[], help="法律文件摘要文件，可重复")
     parser.add_argument("--auto-select-competitors", action="store_true", help="跳过人工确认竞品环节，自动选取前 N 个候选竞品")
     parser.add_argument("--max-competitors", type=int, default=5, help="--auto-select-competitors 时自动选取的竞品数量上限")
+    parser.add_argument("--auto-approve-reports", action="store_true", help="跳过项目概况/行业分析的人工复核环节，生成后直接往下跑（默认会暂停让你确认或反馈重新生成）")
     parser.add_argument("--output-dir", default="data/bp_reports", help="每个节点报告（markdown+docx）写入的目录")
     parser.add_argument("--search-max-results", type=int, default=5, help="每类检索最多结果数")
     parser.add_argument("--json", action="store_true", help="额外输出完整 PipelineState JSON")
@@ -59,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     progress_callback = None if args.quiet else _stderr_progress
     competitor_selector = _auto_competitor_selector(args.max_competitors) if args.auto_select_competitors else _interactive_competitor_selector
+    overview_review_callback = None if args.auto_approve_reports else _interactive_review_callback("项目基本概况")
+    industry_review_callback = None if args.auto_approve_reports else _interactive_review_callback("行业深度分析")
 
     pipeline = BPPipeline(
         config=BPPipelineConfig(
@@ -81,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
         tech_ip_files=args.tech_ip_files,
         legal_files=args.legal_files,
         competitor_selector=competitor_selector,
+        overview_review_callback=overview_review_callback,
+        industry_review_callback=industry_review_callback,
     )
 
     print(state.final_report.markdown if state.final_report else "(无最终报告)")

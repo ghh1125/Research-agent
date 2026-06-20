@@ -86,8 +86,8 @@ if st.session_state.stage == "form":
             try:
                 pipeline = get_pipeline()
                 st.session_state.company_name = company_name
-                with st.spinner("[0-3.1/7] 开始 → 项目概况 → 行业分析 → 竞品发现..."):
-                    project_input, project_overview, industry_analysis, discovery = pipeline.run_intake_through_discovery(
+                with st.spinner("[0-1/7] 开始 → 项目基本概况..."):
+                    project_input = pipeline.run_start_step(
                         company_name=company_name,
                         website=website or None,
                         bp_files=uploads_to_paths(bp_files, "bp"),
@@ -96,20 +96,82 @@ if st.session_state.stage == "form":
                         industry=industry or None,
                         project_description=project_description or None,
                     )
+                    project_overview = pipeline.run_project_overview_step(project_input)
                 st.session_state.project_input = project_input
                 st.session_state.project_overview = project_overview
-                st.session_state.industry_analysis = industry_analysis
-                st.session_state.discovery = discovery
                 if project_input.missing_fields:
                     st.info(f"提示：以下字段没有从输入或 BP 中识别到，后续报告会标记为信息缺口：{', '.join(project_input.missing_fields)}")
-                st.session_state.sections.append(("项目基本概况", project_overview.markdown, "01_project_overview", "report"))
-                st.session_state.sections.append(("行业深度分析", industry_analysis.markdown, "02_industry_analysis", "report"))
-
-                st.session_state.stage = "select_competitors"
+                st.session_state.stage = "review_overview"
                 st.rerun()
             except Exception as exc:
                 st.error(f"运行出错：{type(exc).__name__}: {exc}")
                 st.caption("常见原因：.env 里 LLM/搜索 API key 没配置或额度用尽，可以检查后重新提交。")
+
+elif st.session_state.stage == "review_overview":
+    st.subheader("第 1 步人工复核：项目基本概况")
+    st.caption("看一下生成结果，没问题就点右边按钮继续；不满意就写反馈，点左边按钮按反馈重新生成这一步。")
+    st.markdown(st.session_state.project_overview.markdown)
+    feedback = st.text_area("反馈（留空 = 没问题）", key="overview_feedback", placeholder="例如：公司注册信息那段写错了，再确认一下")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("按反馈重新生成", key="overview_regenerate"):
+            if not feedback.strip():
+                st.warning("没填反馈内容，要继续的话点右边的按钮就行。")
+            else:
+                try:
+                    pipeline = get_pipeline()
+                    with st.spinner("按反馈重新生成项目基本概况..."):
+                        st.session_state.project_overview = pipeline.run_project_overview_step(st.session_state.project_input, feedback=feedback.strip())
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"运行出错：{type(exc).__name__}: {exc}")
+    with col2:
+        if st.button("确认继续，跑行业深度分析", type="primary", key="overview_approve"):
+            st.session_state.sections.append(("项目基本概况", st.session_state.project_overview.markdown, "01_project_overview", "report"))
+            try:
+                pipeline = get_pipeline()
+                with st.spinner("[2/7] 行业深度分析..."):
+                    st.session_state.industry_analysis = pipeline.run_industry_analysis_step(
+                        st.session_state.project_input, st.session_state.project_overview
+                    )
+                st.session_state.stage = "review_industry"
+                st.rerun()
+            except Exception as exc:
+                st.error(f"运行出错：{type(exc).__name__}: {exc}")
+
+elif st.session_state.stage == "review_industry":
+    st.subheader("第 2 步人工复核：行业深度分析")
+    st.caption("看一下生成结果，没问题就点右边按钮继续；不满意就写反馈，点左边按钮按反馈重新生成这一步。")
+    st.markdown(st.session_state.industry_analysis.markdown)
+    feedback = st.text_area("反馈（留空 = 没问题）", key="industry_feedback", placeholder="例如：市场规模数据来源不可靠，再核实一下")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("按反馈重新生成", key="industry_regenerate"):
+            if not feedback.strip():
+                st.warning("没填反馈内容，要继续的话点右边的按钮就行。")
+            else:
+                try:
+                    pipeline = get_pipeline()
+                    with st.spinner("按反馈重新生成行业深度分析..."):
+                        st.session_state.industry_analysis = pipeline.run_industry_analysis_step(
+                            st.session_state.project_input, st.session_state.project_overview, feedback=feedback.strip()
+                        )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"运行出错：{type(exc).__name__}: {exc}")
+    with col2:
+        if st.button("确认继续，跑竞品发现", type="primary", key="industry_approve"):
+            st.session_state.sections.append(("行业深度分析", st.session_state.industry_analysis.markdown, "02_industry_analysis", "report"))
+            try:
+                pipeline = get_pipeline()
+                with st.spinner("[3.1/7] 竞品发现..."):
+                    st.session_state.discovery = pipeline.run_competitor_discovery_step(
+                        st.session_state.project_input, st.session_state.project_overview, st.session_state.industry_analysis
+                    )
+                st.session_state.stage = "select_competitors"
+                st.rerun()
+            except Exception as exc:
+                st.error(f"运行出错：{type(exc).__name__}: {exc}")
 
 elif st.session_state.stage == "select_competitors":
     discovery = st.session_state.discovery
@@ -164,6 +226,7 @@ elif st.session_state.stage == "select_competitors":
                 ("法律尽调", due_diligence.legal, "legal"),
             ]:
                 st.session_state.sections.append((sub_title, report.markdown, "04_due_diligence", name))
+            st.session_state.sections.append(("深度尽调汇总", due_diligence.markdown, "04_due_diligence", "summary"))
             st.session_state.sections.append(("估值分析", valuation_analysis.markdown, "05_valuation", "report"))
             st.session_state.sections.append(("项目投研报告（最终）", final_report.markdown, "06_final_report", "report"))
 

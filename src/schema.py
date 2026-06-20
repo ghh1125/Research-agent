@@ -248,6 +248,7 @@ class DueDiligenceBundle(BaseModel):
     legal: LegalDueDiligence
     risk_register: list[RiskRegisterItem] = Field(default_factory=list)
     evidence_index: list[Source] = Field(default_factory=list)
+    markdown: str = ""
 
 
 # ---------------------------------------------------------------------------
