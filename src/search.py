@@ -90,13 +90,22 @@ def collect_evidence(
 
     blocks: list[str] = []
     sources: list[Source] = []
+    errors: list[str] = []
     for query in queries:
         try:
             results = client.search(query, category=category, max_results=max_results)
         except Exception as exc:  # pragma: no cover - external API
-            blocks.append(f"[query={query}] search_error={exc}")
+            errors.append(f"[query={query}] {exc}")
             continue
         for item in results:
             blocks.append(f"[query={query}] {item['title']}\n{item['content']}\nsource_url={item.get('url')}")
             sources.append(Source(title=item["title"], url=item.get("url"), provider=item.get("provider")))
+
+    if errors and not sources:
+        # Every single query failed (typically: no search provider configured at all, or the
+        # configured key is invalid) — fail loudly instead of silently handing the LLM empty
+        # "evidence" with leaked exception text, which would look like a real degraded-but-honest
+        # report instead of a configuration error.
+        raise RuntimeError(f"Search category={category} failed for all {len(queries)} queries: {'; '.join(errors)}")
+
     return "\n\n".join(blocks), sources

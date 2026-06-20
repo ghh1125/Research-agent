@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from src.schema import NodeMeta
@@ -46,12 +47,10 @@ def write_docx(markdown_text: str, out_dir: str | Path, name: str) -> Path:
             document.add_paragraph("")
             continue
         stripped = line.strip()
-        if stripped.startswith("### "):
-            document.add_heading(stripped[4:], level=3)
-        elif stripped.startswith("## "):
-            document.add_heading(stripped[3:], level=2)
-        elif stripped.startswith("# "):
-            document.add_heading(stripped[2:], level=1)
+        heading_match = re.match(r"(#+)\s+(.*)", stripped)
+        if heading_match:
+            level = min(len(heading_match.group(1)), 9)
+            document.add_heading(heading_match.group(2), level=level)
         elif stripped.startswith("- ") or stripped.startswith("* "):
             indent = (len(line) - len(line.lstrip())) // 2
             document.add_paragraph(stripped[2:], style="List Bullet" if indent == 0 else "List Bullet 2")
