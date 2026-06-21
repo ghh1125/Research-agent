@@ -77,6 +77,8 @@ pip install -r requirements.txt
 
 ### 1.3 配置 API Key
 
+这一步只对 **CLI**（第 3 节）生效。**网页版**（第 2 节，包括部署到 Streamlit Community Cloud）不读 `.env` 里的 key，每个访问者要在网页左侧栏自己填一份，见 2.1 节说明——这样部署给别人用时，消耗的是访问者自己的 API 额度，不会扣到部署者账上。
+
 ```bash
 cp .env.example .env
 ```
@@ -111,6 +113,8 @@ streamlit run app.py
 ```
 
 终端会打印一个本地地址（默认 `http://localhost:8501`，被占用时会自动换成 8502 等），浏览器打开它。
+
+打开页面后，**先在左侧栏填两个 API Key**（DashScope + Serper），不填的话下面表单的"开始尽调"按钮是灰的点不动。这两个 key 只存在你这次浏览器会话的内存里，不会写进任何文件、不会上传、不会被其他访问者看到或共用——每个人用自己的 key，互不影响、互不可见。
 
 ### 2.2 第 0 步：填写项目基本信息
 
@@ -184,6 +188,17 @@ streamlit run app.py
 最后一个折叠区"项目投研报告（最终）"就是给投委会/立项用的完整报告。
 
 想测下一个项目，点底部 **"重新开始一个新项目"**，会清空当前会话状态（包括已上传文件的临时目录）。
+
+### 2.6 部署到 Streamlit Community Cloud（公开链接，不用一直开着自己电脑）
+
+本地 `streamlit run app.py` 只要电脑关机/断网就会下线，临时隧道（serveo 等）同理。要一个不依赖个人电脑、长期能用的公开链接，最简单的免费方式是部署到 Streamlit 官方的 Community Cloud：
+
+1. 确认代码已经 `git push` 到 GitHub（`.env` 不会被推上去，`.gitignore` 已排除）。
+2. 浏览器打开 [share.streamlit.io](https://share.streamlit.io)，用 GitHub 账号登录并授权。
+3. 点 "New app"，选这个仓库、`main` 分支、主文件填 `app.py`，点 "Deploy"。
+4. 部署完会拿到一个永久链接（形如 `xxx.streamlit.app`），跟本地电脑开不开机无关。
+5. **不需要在 Streamlit Cloud 后台配置任何 Secrets**——因为每个访问者（包括部署者自己）都要在网页左侧栏自己填 DashScope/Serper key 才能用，详见 2.1 节，部署者的 key 不会被别人占用额度。
+6. 免费版有资源限制：长时间没人访问会自动休眠，有新访问会自动唤醒（首次唤醒要等几十秒）。
 
 ---
 

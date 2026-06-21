@@ -1,13 +1,34 @@
 from __future__ import annotations
 
+import dataclasses
+import os
 import tempfile
 from pathlib import Path
 
 import streamlit as st
 
 from src.files import save_uploaded_bytes
+from src.llm import RealLLMClient
 from src.pipeline import BPPipeline, BPPipelineConfig
 from src.report import write_node_report
+from src.search import RealSearchClient
+from src.settings import get_settings
+
+
+def _load_streamlit_secrets_into_env() -> None:
+    """On Streamlit Community Cloud, API keys configured in the dashboard's Secrets UI arrive
+    via st.secrets, not os.environ — but settings.py reads os.environ (via a local .env file
+    when running locally). Mirror st.secrets into os.environ so the same settings.py works
+    unchanged in both places. No-op locally when no secrets.toml exists."""
+
+    try:
+        for key, value in st.secrets.items():
+            os.environ.setdefault(key, str(value))
+    except Exception:
+        pass
+
+
+_load_streamlit_secrets_into_env()
 
 st.set_page_config(page_title="VC BP 尽调 Pipeline", layout="wide")
 
@@ -23,10 +44,28 @@ def init_state() -> None:
         st.session_state.sections = []  # [(title, markdown, out_subdir, name), ...]
 
 
+def _session_settings():
+    """Base settings (provider/model/base_url) come from the deployer's .env or Streamlit
+    secrets as usual; only the two API keys are overridden with this session's own values,
+    keeping them scoped to this user's BPPipeline instance instead of os.environ."""
+
+    base = get_settings()
+    return dataclasses.replace(
+        base,
+        dashscope_api_key=st.session_state.get("user_dashscope_key", "").strip(),
+        serper_api_key=st.session_state.get("user_serper_key", "").strip(),
+    )
+
+
 def get_pipeline() -> BPPipeline:
     if "pipeline" not in st.session_state:
         out_dir = Path(st.session_state.work_dir) / "reports"
-        st.session_state.pipeline = BPPipeline(config=BPPipelineConfig(output_dir=out_dir))
+        settings = _session_settings()
+        st.session_state.pipeline = BPPipeline(
+            config=BPPipelineConfig(output_dir=out_dir),
+            llm_client=RealLLMClient(settings=settings),
+            search_client=RealSearchClient(settings=settings),
+        )
     return st.session_state.pipeline
 
 
@@ -55,9 +94,35 @@ def reset_session() -> None:
         del st.session_state[key]
 
 
+def has_required_api_keys() -> bool:
+    return bool(st.session_state.get("user_dashscope_key", "").strip()) and bool(st.session_state.get("user_serper_key", "").strip())
+
+
+def render_api_key_sidebar() -> None:
+    """Every visitor must supply their own DashScope/Serper key — this app has no shared
+    deployer-side key, so usage cost/quota is never incurred on the deployer's account.
+
+    Important: this does NOT write into os.environ. Streamlit can serve multiple concurrent
+    users from the same Python process, and os.environ is process-global — writing a key
+    there would leak it into every other visitor's session. Keys stay in st.session_state
+    (per-session) and are only wired into this session's own LLM/search clients in
+    get_pipeline() below."""
+
+    with st.sidebar:
+        st.subheader("API Key（必填）")
+        st.caption("本工具不提供共享 key，请填入你自己的 DashScope 和 Serper API Key。只保存在你本次会话内存中，不会被保存到任何文件、不会上传、不会给其他访问者共享。")
+        st.text_input("DashScope API Key *", type="password", key="user_dashscope_key", placeholder="必填，sk-...")
+        st.text_input("Serper API Key *", type="password", key="user_serper_key", placeholder="必填")
+        if not has_required_api_keys():
+            st.warning("两个 key 都填完才能开始尽调。")
+        elif "pipeline" in st.session_state:
+            st.caption("当前会话已经在跑了，改 key 要点「重新开始一个新项目」才会用新 key。")
+
+
 init_state()
+render_api_key_sidebar()
 st.title("VC BP 尽调 Pipeline")
-st.caption("7 个节点：开始 → 项目基本概况 → 行业深度分析 → 竞品发现/竞品矩阵分析 → 深度尽调 → 估值分析 → 综合研判与报告输出。需要在 .env 配置好 LLM 和搜索 API key 后才能运行。")
+st.caption("7 个节点：开始 → 项目基本概况 → 行业深度分析 → 竞品发现/竞品矩阵分析 → 深度尽调 → 估值分析 → 综合研判与报告输出。请先在左侧栏填入你自己的 DashScope 和 Serper API Key 才能运行。")
 
 for title, markdown_text, out_subdir, name in st.session_state.sections:
     render_report_section(title, markdown_text, out_subdir, name)
@@ -77,10 +142,12 @@ if st.session_state.stage == "form":
         bp_files = st.file_uploader(
             "BP 文件（PDF / PPT / Word，可多选）", accept_multiple_files=True, type=["pdf", "ppt", "pptx", "doc", "docx"], help="会自动解析文本用于补全上面留空的字段"
         )
-        submitted = st.form_submit_button("开始尽调", type="primary")
+        submitted = st.form_submit_button("开始尽调", type="primary", disabled=not has_required_api_keys())
 
     if submitted:
-        if not company_name.strip():
+        if not has_required_api_keys():
+            st.error("请先在左侧栏填入 DashScope 和 Serper API Key。")
+        elif not company_name.strip():
             st.error("公司名称是必填项，请填写后再提交。")
         else:
             try:
