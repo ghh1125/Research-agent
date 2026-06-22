@@ -65,7 +65,7 @@ def get_settings() -> RuntimeSettings:
         openai_model=_first("OPENAI_MODEL", default="gpt-4.1"),
         dashscope_api_key=_first("DASHSCOPE_API_KEY"),
         dashscope_base_url=_first("DASHSCOPE_BASE_URL", default="https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        dashscope_model=_first("DASHSCOPE_MODEL", default="qwen-plus"),
+        dashscope_model=_first("DASHSCOPE_MODEL", default="qwen3.7-max-2026-06-08"),
         openrouter_api_key=_first("OPENROUTER_API_KEY"),
         openrouter_base_url=_first("OPENROUTER_BASE_URL", default="https://openrouter.ai/api/v1"),
         openrouter_model=_first("OPENROUTER_MODEL", default="openai/gpt-4.1"),
