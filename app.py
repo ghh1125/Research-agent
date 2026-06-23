@@ -74,6 +74,17 @@ def uploads_to_paths(uploaded_files, subdir: str) -> list[str]:
     return save_uploaded_bytes(items, st.session_state.work_dir, subdir)
 
 
+def add_section(entry: tuple[str, str, str, str]) -> None:
+    """Append a report section, replacing any earlier entry with the same (out_subdir, name).
+    Needed because a later pipeline step can fail and leave the user back on the same review
+    page; clicking the approve button again must not re-add a section that's already there —
+    duplicate (out_subdir, name) pairs collide on the download_button widget key downstream."""
+
+    _, _, out_subdir, name = entry
+    st.session_state.sections = [s for s in st.session_state.sections if not (s[2] == out_subdir and s[3] == name)]
+    st.session_state.sections.append(entry)
+
+
 def render_report_section(title: str, markdown_text: str, out_subdir: str, name: str) -> None:
     out_dir = Path(st.session_state.work_dir) / "reports" / out_subdir
     paths = write_node_report(markdown_text, out_dir, name)
@@ -194,7 +205,7 @@ elif st.session_state.stage == "review_overview":
                     st.error(f"运行出错：{type(exc).__name__}: {exc}")
     with col2:
         if st.button("确认继续，跑行业深度分析", type="primary", key="overview_approve"):
-            st.session_state.sections.append(("项目基本概况", st.session_state.project_overview.markdown, "01_project_overview", "report"))
+            add_section(("项目基本概况", st.session_state.project_overview.markdown, "01_project_overview", "report"))
             try:
                 pipeline = get_pipeline()
                 with st.spinner("[2/7] 行业深度分析..."):
@@ -228,7 +239,7 @@ elif st.session_state.stage == "review_industry":
                     st.error(f"运行出错：{type(exc).__name__}: {exc}")
     with col2:
         if st.button("确认继续，跑竞品发现", type="primary", key="industry_approve"):
-            st.session_state.sections.append(("行业深度分析", st.session_state.industry_analysis.markdown, "02_industry_analysis", "report"))
+            add_section(("行业深度分析", st.session_state.industry_analysis.markdown, "02_industry_analysis", "report"))
             try:
                 pipeline = get_pipeline()
                 with st.spinner("[3.1/7] 竞品发现..."):
@@ -284,7 +295,7 @@ elif st.session_state.stage == "select_competitors":
                 )
 
             if selected_ids:
-                st.session_state.sections.append(("竞品矩阵分析", competitor_analysis.markdown, "03_competitor_analysis", "report"))
+                add_section(("竞品矩阵分析", competitor_analysis.markdown, "03_competitor_analysis", "report"))
             for sub_title, report, name in [
                 ("团队尽调", due_diligence.team, "team"),
                 ("业务尽调", due_diligence.business, "business"),
@@ -292,10 +303,10 @@ elif st.session_state.stage == "select_competitors":
                 ("技术与知识产权尽调", due_diligence.tech_ip, "tech_ip"),
                 ("法律尽调", due_diligence.legal, "legal"),
             ]:
-                st.session_state.sections.append((sub_title, report.markdown, "04_due_diligence", name))
-            st.session_state.sections.append(("深度尽调汇总", due_diligence.markdown, "04_due_diligence", "summary"))
-            st.session_state.sections.append(("估值分析", valuation_analysis.markdown, "05_valuation", "report"))
-            st.session_state.sections.append(("项目投研报告（最终）", final_report.markdown, "06_final_report", "report"))
+                add_section((sub_title, report.markdown, "04_due_diligence", name))
+            add_section(("深度尽调汇总", due_diligence.markdown, "04_due_diligence", "summary"))
+            add_section(("估值分析", valuation_analysis.markdown, "05_valuation", "report"))
+            add_section(("项目投研报告（最终）", final_report.markdown, "06_final_report", "report"))
 
             st.session_state.stage = "done"
             st.rerun()
