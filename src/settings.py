@@ -59,7 +59,7 @@ def get_settings() -> RuntimeSettings:
     return RuntimeSettings(
         llm_provider=_first("LLM_PROVIDER", default="auto").lower(),
         llm_fallback_providers=fallback,
-        llm_timeout_seconds=float(_first("LLM_TIMEOUT_SECONDS", default="120")),
+        llm_timeout_seconds=float(_first("LLM_TIMEOUT_SECONDS", default="240")),
         openai_api_key=_first("OPENAI_API_KEY"),
         openai_base_url=_first("OPENAI_BASE_URL") or None,
         openai_model=_first("OPENAI_MODEL", default="gpt-4.1"),

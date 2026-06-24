@@ -183,7 +183,7 @@ if st.session_state.stage == "form":
                 st.rerun()
             except Exception as exc:
                 st.error(f"运行出错：{type(exc).__name__}: {exc}")
-                st.caption("常见原因：.env 里 LLM/搜索 API key 没配置或额度用尽，可以检查后重新提交。")
+                st.caption("常见原因：左侧栏 key 没填对/额度用尽（看上面报错具体信息）；如果报错里写的是 timeout/超时，是网络问题，重试一次通常就好。")
 
 elif st.session_state.stage == "review_overview":
     st.subheader("第 1 步人工复核：项目基本概况")
@@ -312,7 +312,7 @@ elif st.session_state.stage == "select_competitors":
             st.rerun()
         except Exception as exc:
             st.error(f"运行出错：{type(exc).__name__}: {exc}")
-            st.caption("常见原因：.env 里 LLM/搜索 API key 没配置或额度用尽，可以检查后点击下方按钮重新开始。")
+            st.caption("常见原因：左侧栏 key 没填对/额度用尽（看上面报错具体信息）；如果报错里写的是 timeout/超时，是网络问题，重试一次通常就好。")
             if st.button("重新开始一个新项目", key="restart_on_error"):
                 reset_session()
                 st.rerun()
