@@ -238,7 +238,38 @@ class BPPipeline:
         tech_ip_files: list[str] | None = None,
         legal_files: list[str] | None = None,
     ) -> tuple[CompetitorAnalysis, DueDiligenceBundle, ValuationAnalysis, FinalInvestmentReport]:
-        """Runs nodes 3.2, 4, 5, 6 — everything after the user confirms which competitors to analyze."""
+        """Compatibility wrapper that runs nodes 3.2-6 without pausing."""
+
+        competitor_analysis = self.run_competitor_analysis_step(
+            project_input=project_input,
+            project_overview=project_overview,
+            industry_analysis=industry_analysis,
+            discovery=discovery,
+            selected_ids=selected_ids,
+        )
+        due_diligence, valuation_analysis, final_report = self.run_after_competitor_analysis(
+            project_input=project_input,
+            project_overview=project_overview,
+            industry_analysis=industry_analysis,
+            competitor_analysis=competitor_analysis,
+            team_files=team_files,
+            financial_files=financial_files,
+            business_plan_files=business_plan_files,
+            tech_ip_files=tech_ip_files,
+            legal_files=legal_files,
+        )
+        return competitor_analysis, due_diligence, valuation_analysis, final_report
+
+    def run_competitor_analysis_step(
+        self,
+        *,
+        project_input: ProjectInput,
+        project_overview: ProjectOverview,
+        industry_analysis: IndustryAnalysis,
+        discovery: CompetitorDiscovery,
+        selected_ids: list[str],
+    ) -> CompetitorAnalysis:
+        """Node 3.2 only: generate the report for the user's confirmed shortlist."""
 
         discovery.selected_ids = selected_ids
         if selected_ids:
@@ -253,8 +284,23 @@ class BPPipeline:
                 search_max_results=self.config.search_max_results,
             )
             self._emit("[node 3.2/7] 竞品矩阵分析 done")
-        else:
-            competitor_analysis = empty_competitor_analysis()
+            return competitor_analysis
+        return empty_competitor_analysis()
+
+    def run_after_competitor_analysis(
+        self,
+        *,
+        project_input: ProjectInput,
+        project_overview: ProjectOverview,
+        industry_analysis: IndustryAnalysis,
+        competitor_analysis: CompetitorAnalysis,
+        team_files: list[str] | None = None,
+        financial_files: list[str] | None = None,
+        business_plan_files: list[str] | None = None,
+        tech_ip_files: list[str] | None = None,
+        legal_files: list[str] | None = None,
+    ) -> tuple[DueDiligenceBundle, ValuationAnalysis, FinalInvestmentReport]:
+        """Run nodes 4-6 using an already generated competitor report."""
 
         self._emit("[node 4/7] 深度尽调 start")
         team = run_team_due_diligence(
@@ -297,7 +343,7 @@ class BPPipeline:
         final_report = run_final_report(project_input, project_overview, industry_analysis, competitor_analysis, due_diligence, valuation_analysis, llm_client=self.llm_client)
         self._emit("[node 6/7] 综合研判与报告输出 done")
 
-        return competitor_analysis, due_diligence, valuation_analysis, final_report
+        return due_diligence, valuation_analysis, final_report
 
     def run(
         self,

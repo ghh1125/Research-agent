@@ -16,6 +16,66 @@ def test_select_all_competitors_returns_every_id() -> None:
     assert select_all_competitors(discovery) == ["c1", "c2"]
 
 
+def test_competitor_analysis_step_does_not_start_due_diligence(tmp_path: Path, fake_llm_client, fake_search_client) -> None:
+    pipeline = BPPipeline(
+        config=BPPipelineConfig(output_dir=tmp_path / "reports", search_max_results=1),
+        llm_client=fake_llm_client,
+        search_client=fake_search_client,
+    )
+    project_input, overview, industry, discovery = pipeline.run_intake_through_discovery(
+        company_name="示例科技",
+        industry="人工智能",
+        project_description="企业级 AI 软件",
+    )
+    fake_llm_client.calls.clear()
+
+    report = pipeline.run_competitor_analysis_step(
+        project_input=project_input,
+        project_overview=overview,
+        industry_analysis=industry,
+        discovery=discovery,
+        selected_ids=[discovery.candidates[0].id],
+    )
+
+    assert report.markdown
+    assert fake_llm_client.calls == ["_CompetitorAnalysisLLM"]
+
+
+def test_after_competitor_analysis_does_not_regenerate_competitor_report(
+    tmp_path: Path, fake_llm_client, fake_search_client
+) -> None:
+    pipeline = BPPipeline(
+        config=BPPipelineConfig(output_dir=tmp_path / "reports", search_max_results=1),
+        llm_client=fake_llm_client,
+        search_client=fake_search_client,
+    )
+    project_input, overview, industry, discovery = pipeline.run_intake_through_discovery(
+        company_name="示例科技",
+        industry="人工智能",
+        project_description="企业级 AI 软件",
+    )
+    competitor_report = pipeline.run_competitor_analysis_step(
+        project_input=project_input,
+        project_overview=overview,
+        industry_analysis=industry,
+        discovery=discovery,
+        selected_ids=[discovery.candidates[0].id],
+    )
+    fake_llm_client.calls.clear()
+
+    due_diligence, valuation, final_report = pipeline.run_after_competitor_analysis(
+        project_input=project_input,
+        project_overview=overview,
+        industry_analysis=industry,
+        competitor_analysis=competitor_report,
+    )
+
+    assert due_diligence.markdown
+    assert valuation.markdown
+    assert final_report.markdown
+    assert "_CompetitorAnalysisLLM" not in fake_llm_client.calls
+
+
 def test_full_pipeline_runs_all_seven_nodes(tmp_path: Path, fake_llm_client, fake_search_client) -> None:
     pipeline = BPPipeline(
         config=BPPipelineConfig(output_dir=tmp_path / "reports", search_max_results=1),
