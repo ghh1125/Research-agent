@@ -257,7 +257,7 @@ elif st.session_state.stage == "select_competitors":
     st.caption("这是 pipeline 里唯一需要人工确认的环节：下面是 LLM 找到的候选竞品 longlist，勾选你认为相关的，取消勾选你认为不相关的。")
     selected_ids: list[str] = []
     if not discovery.candidates:
-        st.warning("没有发现候选竞品（可能是检索没有命中），将跳过竞品矩阵分析，直接进入深度尽调。")
+        st.warning("没有发现候选竞品（可能是检索没有命中），将生成一份明确标注为跳过的竞品报告。")
     else:
         for candidate in discovery.candidates:
             label = f"**{candidate.name}**　|　关系：{candidate.relationship}　|　{candidate.product_or_service}"
@@ -266,27 +266,77 @@ elif st.session_state.stage == "select_competitors":
                 selected_ids.append(candidate.id)
         st.caption("提示：至少勾选 1 个才会生成竞品矩阵分析；全部取消勾选等同于跳过该节点。")
 
-    st.markdown("---")
-    st.subheader("第 4 步预告：深度尽调补充材料（选填）")
-    st.caption("确认竞品后会立即用到这些文件，没有就留空，对应尽调报告会标记资料不足。")
-    team_files = st.file_uploader("创始团队资料", accept_multiple_files=True, key="team_upload", help="简历、过往履历等，用于团队尽调")
-    financial_files = st.file_uploader(
-        "财务报表（建议 xlsx，便于程序自动算财务比率）", accept_multiple_files=True, key="financial_upload", type=["xlsx", "xls", "pdf", "docx"], help="收入/成本/净利润/经营现金流相关数据；xlsx 表格能被精确提取，PDF/Word 只能做关键词匹配兜底"
-    )
-    business_plan_files = st.file_uploader("商业计划书 / 业务规划书", accept_multiple_files=True, key="bizplan_upload", help="用于业务尽调")
-    tech_ip_files = st.file_uploader("技术与知识产权资料", accept_multiple_files=True, key="techip_upload", help="技术架构、专利、软著清单等")
-    legal_files = st.file_uploader("法律文件摘要", accept_multiple_files=True, key="legal_upload", help="股权结构、核心合同、未决诉讼等")
-
-    if st.button("确认竞品，继续后续分析", type="primary"):
+    if st.button("生成竞品矩阵分析报告", type="primary", key="generate_competitor_report"):
         try:
             pipeline = get_pipeline()
-            with st.spinner("[3.2-6/7] 竞品矩阵分析 → 深度尽调 → 估值分析 → 综合报告..."):
-                competitor_analysis, due_diligence, valuation_analysis, final_report = pipeline.run_after_competitor_selection(
+            with st.spinner("[3.2/7] 正在分析选中的竞品并生成矩阵报告..."):
+                st.session_state.competitor_analysis = pipeline.run_competitor_analysis_step(
                     project_input=st.session_state.project_input,
                     project_overview=st.session_state.project_overview,
                     industry_analysis=st.session_state.industry_analysis,
                     discovery=discovery,
                     selected_ids=selected_ids,
+                )
+            st.session_state.stage = "show_competitor_report"
+            st.rerun()
+        except Exception as exc:
+            st.error(f"运行出错：{type(exc).__name__}: {exc}")
+            st.caption("竞品分析没有完成，请检查 API key、网络或模型返回后重试。")
+
+elif st.session_state.stage == "show_competitor_report":
+    competitor_analysis = st.session_state.competitor_analysis
+    st.subheader("第 3.2 步：竞品矩阵分析报告")
+    st.caption("以下报告将作为后续业务尽调、估值分析和综合研判的输入。")
+    st.markdown(competitor_analysis.markdown)
+
+    report_dir = Path(st.session_state.work_dir) / "reports" / "03_competitor_analysis"
+    report_paths = write_node_report(competitor_analysis.markdown, report_dir, "report")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "下载 Markdown",
+            data=competitor_analysis.markdown,
+            file_name="competitor_analysis.md",
+            key="competitor_preview_md",
+        )
+    if "docx" in report_paths:
+        with col2:
+            st.download_button(
+                "下载 DOCX",
+                data=Path(report_paths["docx"]).read_bytes(),
+                file_name="competitor_analysis.docx",
+                key="competitor_preview_docx",
+            )
+
+    if st.button("进入深度尽调", type="primary", key="enter_due_diligence"):
+        add_section(("竞品矩阵分析", competitor_analysis.markdown, "03_competitor_analysis", "report"))
+        st.session_state.stage = "upload_due_diligence"
+        st.rerun()
+
+elif st.session_state.stage == "upload_due_diligence":
+    st.subheader("第 4 步：深度尽调补充材料（选填）")
+    st.caption("竞品矩阵分析已经完成。请按类别补充材料；没有的文件可以留空，对应尽调报告会明确标记资料不足。")
+    team_files = st.file_uploader("创始团队资料", accept_multiple_files=True, key="team_upload", help="简历、过往履历等，用于团队尽调")
+    financial_files = st.file_uploader(
+        "财务报表（建议 xlsx，便于程序自动算财务比率）",
+        accept_multiple_files=True,
+        key="financial_upload",
+        type=["xlsx", "xls", "pdf", "docx"],
+        help="收入/成本/净利润/经营现金流相关数据；xlsx 表格能被精确提取，PDF/Word 只能做关键词匹配兜底",
+    )
+    business_plan_files = st.file_uploader("商业计划书 / 业务规划书", accept_multiple_files=True, key="bizplan_upload", help="用于业务尽调")
+    tech_ip_files = st.file_uploader("技术与知识产权资料", accept_multiple_files=True, key="techip_upload", help="技术架构、专利、软著清单等")
+    legal_files = st.file_uploader("法律文件摘要", accept_multiple_files=True, key="legal_upload", help="股权结构、核心合同、未决诉讼等")
+
+    if st.button("开始深度尽调", type="primary", key="start_due_diligence"):
+        try:
+            pipeline = get_pipeline()
+            with st.spinner("[4-6/7] 深度尽调 → 估值分析 → 综合报告..."):
+                due_diligence, valuation_analysis, final_report = pipeline.run_after_competitor_analysis(
+                    project_input=st.session_state.project_input,
+                    project_overview=st.session_state.project_overview,
+                    industry_analysis=st.session_state.industry_analysis,
+                    competitor_analysis=st.session_state.competitor_analysis,
                     team_files=uploads_to_paths(team_files, "team"),
                     financial_files=uploads_to_paths(financial_files, "financial"),
                     business_plan_files=uploads_to_paths(business_plan_files, "bizplan"),
@@ -294,8 +344,6 @@ elif st.session_state.stage == "select_competitors":
                     legal_files=uploads_to_paths(legal_files, "legal"),
                 )
 
-            if selected_ids:
-                add_section(("竞品矩阵分析", competitor_analysis.markdown, "03_competitor_analysis", "report"))
             for sub_title, report, name in [
                 ("团队尽调", due_diligence.team, "team"),
                 ("业务尽调", due_diligence.business, "business"),
@@ -312,7 +360,7 @@ elif st.session_state.stage == "select_competitors":
             st.rerun()
         except Exception as exc:
             st.error(f"运行出错：{type(exc).__name__}: {exc}")
-            st.caption("常见原因：左侧栏 key 没填对/额度用尽（看上面报错具体信息）；如果报错里写的是 timeout/超时，是网络问题，重试一次通常就好。")
+            st.caption("深度尽调没有完成，竞品报告和已选文件仍保留在当前页面，可以直接重试。")
             if st.button("重新开始一个新项目", key="restart_on_error"):
                 reset_session()
                 st.rerun()
