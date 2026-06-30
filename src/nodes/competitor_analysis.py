@@ -96,6 +96,7 @@ def run_competitor_analysis(
     search_client = search_client or RealSearchClient()
     all_sources = []
     competitor_blocks = []
+    evidence_chars_per_competitor = max(600, 8000 // len(selected))
     for candidate in selected:
         queries = [
             f"{candidate.name} 官网 产品 客户案例 商业模式",
@@ -110,7 +111,7 @@ def run_competitor_analysis(
             f"竞争关系：{candidate.relationship}\n"
             f"发现阶段产品/服务：{candidate.product_or_service}\n"
             f"纳入理由：{candidate.reason}\n"
-            f"公开检索证据：\n{text}"
+            f"公开检索证据：\n{text[:evidence_chars_per_competitor]}"
         )
 
     client = llm_client or RealLLMClient()
@@ -125,7 +126,7 @@ def run_competitor_analysis(
             competitive_landscape=industry_analysis.competitive_landscape,
             opportunities_and_barriers=industry_analysis.opportunities_and_barriers,
             opportunity_mapping_to_target=industry_analysis.opportunity_mapping_to_target,
-            competitor_text="\n\n".join(competitor_blocks)[:9000] or "(无资料)",
+            competitor_text="\n\n".join(competitor_blocks) or "(无资料)",
         ),
         _CompetitorAnalysisLLM,
     )

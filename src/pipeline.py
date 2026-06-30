@@ -68,10 +68,10 @@ class BPPipelineConfig(BaseModel):
 class BPPipeline:
     """Orchestrates the 7-node VC due-diligence pipeline end to end.
 
-    Exposes two phase methods (`run_intake_through_discovery` / `run_after_competitor_selection`)
-    so callers that need to pause for the 竞品发现 human-in-the-loop confirmation across multiple
-    interactions (e.g. a web UI) don't have to duplicate the node-calling/peer_findings wiring.
-    `run()` is the single-shot convenience wrapper used by the CLI.
+    Exposes stage methods for intake/discovery, competitor analysis, and post-analysis due
+    diligence so a web UI can pause at both human interaction boundaries without duplicating
+    node wiring. `run_after_competitor_selection()` and `run()` remain single-shot convenience
+    wrappers for CLI and other non-interactive callers.
     """
 
     NODE_ORDER = [

@@ -77,3 +77,62 @@ def test_capability_matrix_renders_as_markdown_table() -> None:
     assert "| 对比维度 | 目标公司 | 竞品甲 |" in rendered
     assert "| 产品能力 | 私有化\\|部署<br>支持 | SaaS 服务 |" in rendered
     assert "| 商业模式 | 订阅加实施 | 订阅制 |" in rendered
+
+
+def test_prompt_keeps_every_selected_competitor_when_evidence_is_long(fake_llm_client) -> None:
+    class LongEvidenceSearch:
+        def search(self, query: str, *, category: str = "general", max_results: int = 5):
+            return [{"title": query, "url": "https://example.com", "content": "长证据" * 4000, "provider": "fake"}]
+
+    project_input = ProjectInput(company_name="目标公司", industry="企业服务")
+    project_overview = ProjectOverview(
+        company_registration_info="注册信息",
+        development_milestones="发展历程",
+        core_business="企业软件",
+        product_service_system="管理平台",
+        use_cases_and_value="提升运营效率",
+        org_structure_and_operations="组织与运营",
+    )
+    industry_analysis = IndustryAnalysis(
+        industry_definition="企业服务",
+        development_trends="云化",
+        market_size_and_drivers="数字化驱动",
+        industry_chain_structure="软件与服务",
+        competitive_landscape="竞争分散",
+        policy_environment="合规经营",
+        opportunities_and_barriers="客户迁移成本高",
+        opportunity_mapping_to_target="垂直场景机会",
+    )
+    discovery = CompetitorDiscovery(
+        candidates=[
+            CompetitorCandidate(
+                id="c1",
+                name="竞品甲",
+                product_or_service="产品甲",
+                relationship="直接竞品",
+                reason="同类产品",
+            ),
+            CompetitorCandidate(
+                id="c2",
+                name="竞品乙",
+                product_or_service="产品乙",
+                relationship="直接竞品",
+                reason="同类客户",
+            ),
+        ],
+        selected_ids=["c1", "c2"],
+    )
+
+    run_competitor_analysis(
+        project_input,
+        project_overview,
+        industry_analysis,
+        discovery,
+        llm_client=fake_llm_client,
+        search_client=LongEvidenceSearch(),
+        search_max_results=1,
+    )
+
+    prompt = fake_llm_client.prompts[-1]
+    assert "### 竞品甲" in prompt
+    assert "### 竞品乙" in prompt
