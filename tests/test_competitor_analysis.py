@@ -82,7 +82,14 @@ def test_capability_matrix_renders_as_markdown_table() -> None:
 def test_prompt_keeps_every_selected_competitor_when_evidence_is_long(fake_llm_client) -> None:
     class LongEvidenceSearch:
         def search(self, query: str, *, category: str = "general", max_results: int = 5):
-            return [{"title": query, "url": "https://example.com", "content": "长证据" * 4000, "provider": "fake"}]
+            return [
+                {
+                    "title": query,
+                    "url": "https://example.com",
+                    "content": ("长证据" * 4000) + "关键尾部证据",
+                    "provider": "fake",
+                }
+            ]
 
     project_input = ProjectInput(company_name="目标公司", industry="企业服务")
     project_overview = ProjectOverview(
@@ -136,3 +143,4 @@ def test_prompt_keeps_every_selected_competitor_when_evidence_is_long(fake_llm_c
     prompt = fake_llm_client.prompts[-1]
     assert "### 竞品甲" in prompt
     assert "### 竞品乙" in prompt
+    assert "关键尾部证据" in prompt

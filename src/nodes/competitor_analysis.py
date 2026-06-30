@@ -96,7 +96,6 @@ def run_competitor_analysis(
     search_client = search_client or RealSearchClient()
     all_sources = []
     competitor_blocks = []
-    evidence_chars_per_competitor = max(600, 8000 // len(selected))
     for candidate in selected:
         queries = [
             f"{candidate.name} 官网 产品 客户案例 商业模式",
@@ -111,7 +110,7 @@ def run_competitor_analysis(
             f"竞争关系：{candidate.relationship}\n"
             f"发现阶段产品/服务：{candidate.product_or_service}\n"
             f"纳入理由：{candidate.reason}\n"
-            f"公开检索证据：\n{text[:evidence_chars_per_competitor]}"
+            f"公开检索证据：\n{text}"
         )
 
     client = llm_client or RealLLMClient()
