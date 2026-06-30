@@ -27,6 +27,7 @@ logs/
 output/
 .cache/
 data/
+docs/superpowers/
 
 # Keep example env file tracked
 !.env.example
