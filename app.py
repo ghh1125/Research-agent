@@ -100,6 +100,44 @@ def render_report_section(title: str, markdown_text: str, out_subdir: str, name:
                 )
 
 
+def render_individual_competitor_result(result) -> None:
+    profile = result.profile
+    with st.expander(profile.name, expanded=False):
+        st.markdown(
+            f"""**能力概述**：{profile.capability_summary}
+
+**商业模式**：{profile.business_model}
+
+**客户与场景**：{profile.customer_and_scene}
+
+**技术壁垒**：{profile.tech_barrier}
+
+**融资与商业化进展**：{profile.funding_and_progress}
+
+**相对优势**：{'; '.join(profile.strengths) or '无'}
+
+**相对劣势**：{'; '.join(profile.weaknesses) or '无'}
+"""
+        )
+        st.markdown("**五维矩阵字段**")
+        for dimension, value in result.matrix_values.items():
+            st.markdown(f"- **{dimension}**：{value}")
+        st.markdown(
+            f"""**置信度**：{result.meta.confidence}
+
+**关键假设**：{'; '.join(result.meta.assumptions) or '无'}
+
+**信息缺口**：{'; '.join(result.meta.missing_info) or '无'}
+
+**风险标记**：{'; '.join(result.meta.risk_flags) or '无'}
+"""
+        )
+        if result.meta.sources:
+            st.markdown("**来源**")
+            for source in result.meta.sources:
+                st.markdown(f"- [{source.title}]({source.url})" if source.url else f"- {source.title}")
+
+
 def reset_session() -> None:
     for key in list(st.session_state.keys()):
         del st.session_state[key]
@@ -277,16 +315,24 @@ elif st.session_state.stage == "select_competitors":
                     discovery=discovery,
                     selected_ids=selected_ids,
                 )
-            st.session_state.stage = "show_competitor_report"
+            st.session_state.selected_competitor_ids = selected_ids
+            st.session_state.stage = "review_competitor_report"
             st.rerun()
         except Exception as exc:
             st.error(f"运行出错：{type(exc).__name__}: {exc}")
             st.caption("竞品分析没有完成，请检查 API key、网络或模型返回后重试。")
 
-elif st.session_state.stage == "show_competitor_report":
+elif st.session_state.stage == "review_competitor_report":
     competitor_analysis = st.session_state.competitor_analysis
-    st.subheader("第 3.2 步：竞品矩阵分析报告")
-    st.caption("以下报告将作为后续业务尽调、估值分析和综合研判的输入。")
+    st.subheader("第 3.2 步：竞品分析结果审核")
+    if competitor_analysis.individual_results:
+        st.markdown("### 逐家竞品结构化结果")
+        st.caption("逐项展开查看每个竞品的画像、五维矩阵字段、证据和信息缺口。")
+        for individual_result in competitor_analysis.individual_results:
+            render_individual_competitor_result(individual_result)
+
+    st.markdown("### 最终竞品矩阵分析报告")
+    st.caption("该报告将完整传入业务尽调、估值分析和综合研判。")
     st.markdown(competitor_analysis.markdown)
 
     report_dir = Path(st.session_state.work_dir) / "reports" / "03_competitor_analysis"
@@ -308,10 +354,60 @@ elif st.session_state.stage == "show_competitor_report":
                 key="competitor_preview_docx",
             )
 
-    if st.button("进入深度尽调", type="primary", key="enter_due_diligence"):
-        add_section(("竞品矩阵分析", competitor_analysis.markdown, "03_competitor_analysis", "report"))
-        st.session_state.stage = "upload_due_diligence"
-        st.rerun()
+    feedback = st.text_area(
+        "审核意见 / 修改指令（必填）",
+        key="competitor_review_feedback",
+        placeholder="请写明修改对象、当前问题、期望修改和证据线索",
+        help="例如：竞品甲融资进展可能过期，请重点检索 2025-2026 年融资记录；能力矩阵遗漏私有化部署差异；SWOT 威胁需补充价格竞争影响。",
+    )
+    st.caption("重新生成不是无差别重试。请明确指出具体竞品或报告字段、存在的问题、期望修改及可选证据线索。")
+
+    action_columns = st.columns(3)
+    if competitor_analysis.individual_results:
+        with action_columns[0]:
+            if st.button("按反馈重新汇总", key="resynthesize_competitors"):
+                if not feedback.strip():
+                    st.warning("请先填写具体审核意见，再重新汇总。")
+                else:
+                    try:
+                        pipeline = get_pipeline()
+                        with st.spinner("按审核意见重新汇总竞品矩阵报告..."):
+                            st.session_state.competitor_analysis = pipeline.run_competitor_synthesis_step(
+                                project_input=st.session_state.project_input,
+                                project_overview=st.session_state.project_overview,
+                                industry_analysis=st.session_state.industry_analysis,
+                                competitor_analysis=competitor_analysis,
+                                feedback=feedback.strip(),
+                            )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"重新汇总失败：{type(exc).__name__}: {exc}")
+        with action_columns[1]:
+            if st.button("按反馈重新分析全部竞品", key="reanalyze_all_competitors"):
+                if not feedback.strip():
+                    st.warning("请先填写具体审核意见，再重新分析。")
+                else:
+                    try:
+                        pipeline = get_pipeline()
+                        with st.spinner("按审核意见重新检索并逐家分析全部竞品..."):
+                            st.session_state.competitor_analysis = pipeline.run_competitor_analysis_step(
+                                project_input=st.session_state.project_input,
+                                project_overview=st.session_state.project_overview,
+                                industry_analysis=st.session_state.industry_analysis,
+                                discovery=st.session_state.discovery,
+                                selected_ids=st.session_state.selected_competitor_ids,
+                                feedback=feedback.strip(),
+                                current_analysis=competitor_analysis,
+                            )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"重新分析失败：{type(exc).__name__}: {exc}")
+
+    with action_columns[2]:
+        if st.button("确认并进入深度尽调", type="primary", key="enter_due_diligence"):
+            add_section(("竞品矩阵分析", competitor_analysis.markdown, "03_competitor_analysis", "report"))
+            st.session_state.stage = "upload_due_diligence"
+            st.rerun()
 
 elif st.session_state.stage == "upload_due_diligence":
     st.subheader("第 4 步：深度尽调补充材料（选填）")

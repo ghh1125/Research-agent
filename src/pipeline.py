@@ -6,7 +6,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from src.llm import RealLLMClient
-from src.nodes.competitor_analysis import run_competitor_analysis
+from src.nodes.competitor_analysis import run_competitor_analysis, synthesize_competitor_analysis
 from src.nodes.competitor_discovery import run_competitor_discovery
 from src.nodes.due_diligence import (
     build_due_diligence_bundle,
@@ -268,6 +268,8 @@ class BPPipeline:
         industry_analysis: IndustryAnalysis,
         discovery: CompetitorDiscovery,
         selected_ids: list[str],
+        feedback: str | None = None,
+        current_analysis: CompetitorAnalysis | None = None,
     ) -> CompetitorAnalysis:
         """Node 3.2 only: generate the report for the user's confirmed shortlist."""
 
@@ -282,10 +284,38 @@ class BPPipeline:
                 llm_client=self.llm_client,
                 search_client=self.search_client,
                 search_max_results=self.config.search_max_results,
+                feedback=feedback,
+                current_analysis=current_analysis,
             )
             self._emit("[node 3.2/7] 竞品矩阵分析 done")
             return competitor_analysis
         return empty_competitor_analysis()
+
+    def run_competitor_synthesis_step(
+        self,
+        *,
+        project_input: ProjectInput,
+        project_overview: ProjectOverview,
+        industry_analysis: IndustryAnalysis,
+        competitor_analysis: CompetitorAnalysis,
+        feedback: str,
+    ) -> CompetitorAnalysis:
+        """Re-synthesize the final competitor report without searching or re-running individual analyses."""
+
+        if not feedback.strip():
+            raise ValueError("按反馈重新汇总前必须填写具体审核意见")
+        self._emit("[node 3.2/7] 竞品矩阵重新汇总 start")
+        result = synthesize_competitor_analysis(
+            project_input,
+            project_overview,
+            industry_analysis,
+            competitor_analysis.individual_results,
+            llm_client=self.llm_client,
+            feedback=feedback.strip(),
+            current_analysis=competitor_analysis,
+        )
+        self._emit("[node 3.2/7] 竞品矩阵重新汇总 done")
+        return result
 
     def run_after_competitor_analysis(
         self,

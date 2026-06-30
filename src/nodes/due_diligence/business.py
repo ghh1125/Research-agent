@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
+from src.nodes.competitor_analysis import serialize_competitor_analysis
 from src.report import render_meta_section
 from src.schema import BusinessDueDiligence, BusinessScore, CompetitorAnalysis, IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, RiskNote
 
@@ -19,8 +20,8 @@ _PROMPT = """\
 行业市场规模与增长驱动（来自行业深度分析节点）：
 {market_size_and_drivers}
 
-竞品分析定位判断（参考）：
-{positioning_judgment}
+完整竞品分析对象（不得忽略逐家结果、矩阵、SWOT、来源或信息缺口）：
+{competitor_analysis_context}
 
 用户上传的业务规划书/商业计划书解析文本（节选，可能为空）：
 {business_file_text}
@@ -74,7 +75,7 @@ def run_business_due_diligence(
             core_business=project_overview.core_business,
             use_cases_and_value=project_overview.use_cases_and_value,
             market_size_and_drivers=industry_analysis.market_size_and_drivers,
-            positioning_judgment=competitor_analysis.positioning_judgment or "未提供",
+            competitor_analysis_context=serialize_competitor_analysis(competitor_analysis),
             business_file_text=business_file_text or "(用户未上传业务规划书)",
             peer_findings=peer_findings or "(暂无其他尽调维度的初步发现)",
         ),

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from src.llm import RealLLMClient
+from src.nodes.competitor_analysis import serialize_competitor_analysis
 from src.report import render_meta_section
 from src.schema import (
     CompetitorAnalysis,
@@ -43,8 +44,8 @@ _PROMPT = """\
 行业市场规模/竞争格局（参考）：
 {industry_summary}
 
-竞品矩阵定位判断（参考）：
-{positioning_judgment}
+完整竞品分析对象（用于可比公司筛选、竞争折溢价和风险调整）：
+{competitor_analysis_context}
 
 尽调摘要：
 - 业务评分：{business_score}
@@ -116,7 +117,7 @@ def run_valuation_analysis(
             use_cases_and_value=project_overview.use_cases_and_value,
             weighting_note=weighting_note,
             industry_summary=industry_analysis.market_size_and_drivers,
-            positioning_judgment=competitor_analysis.positioning_judgment or "未提供",
+            competitor_analysis_context=serialize_competitor_analysis(competitor_analysis),
             business_score=due_diligence.business.business_score,
             financial_health_summary=due_diligence.financial.financial_health_summary,
             team_rating=due_diligence.team.capability_rating,

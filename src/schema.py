@@ -149,8 +149,16 @@ class CompetitorProfile(BaseModel):
     weaknesses: list[str] = Field(default_factory=list)
 
 
+class SingleCompetitorAnalysis(BaseModel):
+    candidate_id: str
+    profile: CompetitorProfile
+    matrix_values: dict[str, str] = Field(default_factory=dict)
+    meta: NodeMeta = Field(default_factory=NodeMeta)
+
+
 class CompetitorAnalysis(BaseModel):
     overview: str
+    individual_results: list[SingleCompetitorAnalysis] = Field(default_factory=list)
     competitor_profiles: list[CompetitorProfile] = Field(default_factory=list)
     capability_matrix: list[dict[str, Any]] = Field(default_factory=list)
     swot_strengths: list[str] = Field(default_factory=list)

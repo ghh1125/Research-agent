@@ -130,7 +130,7 @@ def test_prompt_keeps_every_selected_competitor_when_evidence_is_long(fake_llm_c
         selected_ids=["c1", "c2"],
     )
 
-    run_competitor_analysis(
+    result = run_competitor_analysis(
         project_input,
         project_overview,
         industry_analysis,
@@ -140,7 +140,20 @@ def test_prompt_keeps_every_selected_competitor_when_evidence_is_long(fake_llm_c
         search_max_results=1,
     )
 
-    prompt = fake_llm_client.prompts[-1]
-    assert "### 竞品甲" in prompt
-    assert "### 竞品乙" in prompt
-    assert "关键尾部证据" in prompt
+    assert fake_llm_client.calls == [
+        "_SingleCompetitorAnalysisLLM",
+        "_SingleCompetitorAnalysisLLM",
+        "_CompetitorSynthesisLLM",
+    ]
+    first_prompt, second_prompt, synthesis_prompt = fake_llm_client.prompts
+    assert "竞品甲" in first_prompt
+    assert "竞品乙" not in first_prompt
+    assert "竞品乙" in second_prompt
+    assert "竞品甲" not in second_prompt
+    assert "关键尾部证据" in first_prompt
+    assert "关键尾部证据" in second_prompt
+    assert "竞品甲" in synthesis_prompt
+    assert "竞品乙" in synthesis_prompt
+    assert [item.profile.name for item in result.individual_results] == ["竞品甲", "竞品乙"]
+    assert [profile.name for profile in result.competitor_profiles] == ["竞品甲", "竞品乙"]
+    assert len(result.capability_matrix) == 5
