@@ -51,9 +51,11 @@ class FakeLLMClient:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.prompts: list[str] = []
 
     def complete_json(self, prompt: str, schema: type[BaseModel], *, context: dict[str, Any] | None = None) -> BaseModel:
         self.calls.append(schema.__name__)
+        self.prompts.append(prompt)
         return schema.model_validate(_fill_required(schema))
 
 
