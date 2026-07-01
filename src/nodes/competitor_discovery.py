@@ -45,7 +45,7 @@ class _CandidateLLM(BaseModel):
 
 
 class _CompetitorDiscoveryLLM(BaseModel):
-    candidates: list[_CandidateLLM] = Field(default_factory=list)
+    candidates: list[_CandidateLLM] = Field(default_factory=list, min_length=1, max_length=10)
     meta: NodeMetaJudgment = Field(default_factory=NodeMetaJudgment)
 
 

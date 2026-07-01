@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 from src.settings import RuntimeSettings, get_settings
 
 T = TypeVar("T", bound=BaseModel)
+DASHSCOPE_JSON_FALLBACK_MODELS = ("qwen3.7-plus", "qwen3.6-plus")
 
 
 @dataclass(frozen=True)
@@ -113,7 +114,7 @@ class RealLLMClient:
         schema_text = json.dumps(schema.model_json_schema(), ensure_ascii=False)
         full_prompt = f"{prompt}\n\nReturn strict JSON only. It must validate against this JSON schema:\n{schema_text}"
         last_error: Exception | None = None
-        max_repair_attempts = 2
+        max_repair_attempts = 3
         for provider in candidates:
             label = f"llm schema={schema.__name__} provider={provider.name} model={provider.model}"
             messages: list[dict[str, str]] = [
@@ -137,11 +138,16 @@ class RealLLMClient:
                     last_error = parse_exc
                     self._emit(f"    {label} schema_error attempt={attempt}: {str(parse_exc)[:240]}")
                     if attempt < max_repair_attempts - 1:
-                        messages.append({"role": "assistant", "content": content})
+                        if content.strip():
+                            messages.append({"role": "assistant", "content": content})
                         messages.append(
                             {
                                 "role": "user",
-                                "content": f"上一次输出的 JSON 没有通过 schema 校验，错误信息：\n{parse_exc}\n请只输出修正后的完整合法 JSON，不要输出任何解释文字。",
+                                "content": (
+                                    "上一次没有返回内容或返回的 JSON 未通过 schema 校验。"
+                                    f"\n错误信息：\n{parse_exc}"
+                                    "\n请重新生成完整结果，只输出合法 JSON，不要输出解释文字。"
+                                ),
                             }
                         )
                         continue
@@ -198,7 +204,14 @@ class RealLLMClient:
         s = self.settings
         if provider == "dashscope" and s.dashscope_api_key:
             model = explicit_model or s.dashscope_model
-            return [ProviderConfig("dashscope", s.dashscope_api_key, s.dashscope_base_url, item) for item in _model_candidates(model)]
+            models = _model_candidates(model)
+            for fallback_model in DASHSCOPE_JSON_FALLBACK_MODELS:
+                if fallback_model not in models:
+                    models.append(fallback_model)
+            return [
+                ProviderConfig("dashscope", s.dashscope_api_key, s.dashscope_base_url, item)
+                for item in models
+            ]
         if provider == "openai" and s.openai_api_key:
             model = explicit_model or s.openai_model
             return [ProviderConfig("openai", s.openai_api_key, s.openai_base_url, item) for item in _model_candidates(model)]

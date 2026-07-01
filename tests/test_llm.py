@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from types import SimpleNamespace
 
+from pydantic import BaseModel
+
 from src.llm import ProviderConfig, RealLLMClient
+from src.settings import get_settings
+
+
+class _JSONResult(BaseModel):
+    ok: bool
 
 
 def test_dashscope_qwen_37_json_request_disables_thinking(monkeypatch) -> None:
@@ -108,3 +116,54 @@ def test_dashscope_kimi_code_keeps_required_thinking_mode(monkeypatch) -> None:
 
     assert "extra_body" not in calls[0]
     assert "temperature" not in calls[0]
+
+
+def test_dashscope_explicit_model_has_stable_json_fallback_models(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = replace(
+        get_settings(),
+        dashscope_api_key="secret",
+        dashscope_model="deepseek-v4-pro",
+    )
+    client = RealLLMClient(settings=settings)
+
+    candidates = client._provider("dashscope", explicit_model="kimi-k2.7-code")
+
+    assert [item.model for item in candidates] == [
+        "kimi-k2.7-code",
+        "qwen3.7-plus",
+        "qwen3.6-plus",
+    ]
+
+
+def test_complete_json_repairs_empty_response_then_switches_model(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = replace(
+        get_settings(),
+        dashscope_api_key="secret",
+        dashscope_model="kimi-k2.7-code",
+    )
+    client = RealLLMClient(settings=settings)
+    calls: list[str] = []
+
+    def request(provider, messages):
+        calls.append(provider.model)
+        if provider.model == "kimi-k2.7-code":
+            return ""
+        return '{"ok": true}'
+
+    monkeypatch.setattr(client, "_request_content", request)
+
+    result = client.complete_json(
+        "Return JSON",
+        _JSONResult,
+        context={"provider": "dashscope", "model": "kimi-k2.7-code"},
+    )
+
+    assert result.ok is True
+    assert calls == [
+        "kimi-k2.7-code",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code",
+        "qwen3.7-plus",
+    ]

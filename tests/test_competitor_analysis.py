@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from src.nodes import competitor_analysis
 from src.nodes.competitor_analysis import run_competitor_analysis
+from src.nodes.competitor_discovery import _CompetitorDiscoveryLLM
 from src.schema import CompetitorCandidate, CompetitorDiscovery, IndustryAnalysis, ProjectInput, ProjectOverview
+
+
+def test_competitor_discovery_llm_rejects_empty_candidate_list() -> None:
+    with pytest.raises(ValidationError):
+        _CompetitorDiscoveryLLM.model_validate({"candidates": []})
 
 
 def test_prompt_uses_full_upstream_context_and_evidence_rules(fake_llm_client, fake_search_client) -> None:
