@@ -13,7 +13,8 @@ from src.llm_config import (
 from src.settings import get_settings
 
 
-def test_default_dashscope_model_is_qwen_37_plus(monkeypatch) -> None:
+def test_default_dashscope_model_is_qwen_37_plus(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DASHSCOPE_MODEL", raising=False)
 
     assert get_settings().dashscope_model == "qwen3.7-plus"
