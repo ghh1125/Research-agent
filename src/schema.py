@@ -249,11 +249,13 @@ class RiskRegisterItem(BaseModel):
 
 
 class DueDiligenceBundle(BaseModel):
-    team: TeamDueDiligence
-    business: BusinessDueDiligence
-    financial: FinancialDueDiligence
-    tech_ip: TechIPDueDiligence
-    legal: LegalDueDiligence
+    team: TeamDueDiligence | None = None
+    business: BusinessDueDiligence | None = None
+    financial: FinancialDueDiligence | None = None
+    tech_ip: TechIPDueDiligence | None = None
+    legal: LegalDueDiligence | None = None
+    completed_categories: list[str] = Field(default_factory=list)
+    missing_categories: list[str] = Field(default_factory=list)
     risk_register: list[RiskRegisterItem] = Field(default_factory=list)
     evidence_index: list[Source] = Field(default_factory=list)
     markdown: str = ""

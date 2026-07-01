@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.report import render_meta_section
 from src.schema import CapabilityRating, IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, TeamDueDiligence
 from src.search import RealSearchClient, collect_evidence
@@ -53,6 +54,7 @@ def run_team_due_diligence(
     team_files: list[str] | None = None,
     llm_client: RealLLMClient | None = None,
     search_client: RealSearchClient | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> TeamDueDiligence:
     """Node 4 sub-report — 团队尽调."""
 
@@ -64,17 +66,19 @@ def run_team_due_diligence(
     search_text, sources = collect_evidence(search_client, [f"{names} 创业 履历 背景"], category="team_dd", max_results=4)
 
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "funding_round": project_input.funding_round or "未提供",
+        "industry": project_input.industry or "未提供",
+        "founder_summary": project_overview.founder_team_summary or "未提供",
+        "industry_context": industry_analysis.opportunities_and_barriers,
+        "team_file_text": team_file_text or "(用户未上传团队资料)",
+        "search_text": search_text[:5000] or "(无检索结果)",
+    }
     result = client.complete_json(
-        _PROMPT.format(
-            company_name=project_input.company_name,
-            funding_round=project_input.funding_round or "未提供",
-            industry=project_input.industry or "未提供",
-            founder_summary=project_overview.founder_team_summary or "未提供",
-            industry_context=industry_analysis.opportunities_and_barriers,
-            team_file_text=team_file_text or "(用户未上传团队资料)",
-            search_text=search_text[:5000] or "(无检索结果)",
-        ),
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _TeamLLM,
+        context=llm_context(llm_config),
     )
 
     meta = result.meta.to_meta(sources)

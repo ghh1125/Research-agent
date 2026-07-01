@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.schema import FileManifestEntry, NodeMeta, ProjectInput
 
 _NORMALIZE_PROMPT = """\
@@ -57,6 +58,7 @@ def run_start(
     industry: str | None = None,
     project_description: str | None = None,
     llm_client: RealLLMClient | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> ProjectInput:
     """Node 0 — 开始: receive raw user input + BP files, normalize into ProjectInput."""
 
@@ -82,9 +84,14 @@ def run_start(
         "project_description": project_description,
     }
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "raw_input": raw_input,
+        "bp_text": truncate(bp_parsed_content, 4000) or "(无)",
+    }
     normalized = client.complete_json(
-        _NORMALIZE_PROMPT.format(raw_input=raw_input, bp_text=truncate(bp_parsed_content, 4000) or "(无)"),
+        render_prompt(_NORMALIZE_PROMPT, prompt_values, llm_config),
         _NormalizedFields,
+        context=llm_context(llm_config),
     )
 
     meta = NodeMeta(

@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.nodes.competitor_analysis import serialize_competitor_analysis
 from src.report import render_meta_section
 from src.schema import BusinessDueDiligence, BusinessScore, CompetitorAnalysis, IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, RiskNote
@@ -60,6 +61,7 @@ def run_business_due_diligence(
     business_plan_files: list[str] | None = None,
     llm_client: RealLLMClient | None = None,
     peer_findings: str | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> BusinessDueDiligence:
     """Node 4 sub-report — 业务尽调. peer_findings lets earlier-completed due-diligence agents (typically 团队尽调)
     share their preliminary findings so this report can account for cross-domain risk."""
@@ -68,18 +70,20 @@ def run_business_due_diligence(
     business_file_text = truncate("\n\n".join(p.text for p in parsed if p.text), 8000)
 
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "funding_round": project_input.funding_round or "未提供",
+        "core_business": project_overview.core_business,
+        "use_cases_and_value": project_overview.use_cases_and_value,
+        "market_size_and_drivers": industry_analysis.market_size_and_drivers,
+        "competitor_analysis_context": serialize_competitor_analysis(competitor_analysis),
+        "business_file_text": business_file_text or "(用户未上传业务规划书)",
+        "peer_findings": peer_findings or "(暂无其他尽调维度的初步发现)",
+    }
     result = client.complete_json(
-        _PROMPT.format(
-            company_name=project_input.company_name,
-            funding_round=project_input.funding_round or "未提供",
-            core_business=project_overview.core_business,
-            use_cases_and_value=project_overview.use_cases_and_value,
-            market_size_and_drivers=industry_analysis.market_size_and_drivers,
-            competitor_analysis_context=serialize_competitor_analysis(competitor_analysis),
-            business_file_text=business_file_text or "(用户未上传业务规划书)",
-            peer_findings=peer_findings or "(暂无其他尽调维度的初步发现)",
-        ),
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _BusinessLLM,
+        context=llm_context(llm_config),
     )
 
     meta = result.meta.to_meta([])

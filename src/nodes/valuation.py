@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.nodes.competitor_analysis import serialize_competitor_analysis
 from src.report import render_meta_section
 from src.schema import (
@@ -48,6 +49,7 @@ _PROMPT = """\
 {competitor_analysis_context}
 
 尽调摘要：
+{due_diligence_coverage}
 - 业务评分：{business_score}
 - 财务健康度：{financial_health_summary}
 - 团队能力评估：{team_rating}
@@ -96,6 +98,7 @@ def run_valuation_analysis(
     llm_client: RealLLMClient | None = None,
     search_client: RealSearchClient | None = None,
     search_max_results: int = 5,
+    llm_config: LLMCallConfig | None = None,
 ) -> ValuationAnalysis:
     """Node 5 — 估值分析. Method weighting depends on funding_round (seed/A-B vs C/Pre-IPO)."""
 
@@ -106,28 +109,45 @@ def run_valuation_analysis(
     search_text, sources = collect_evidence(search_client, queries, category="valuation", max_results=search_max_results)
 
     client = llm_client or RealLLMClient()
-    result = client.complete_json(
-        _PROMPT.format(
-            company_name=project_input.company_name,
-            funding_round=project_input.funding_round or "未提供",
-            funding_amount=project_input.funding_amount or "未提供",
-            industry=project_input.industry or "未提供",
-            core_business=project_overview.core_business,
-            product_service_system=project_overview.product_service_system,
-            use_cases_and_value=project_overview.use_cases_and_value,
-            weighting_note=weighting_note,
-            industry_summary=industry_analysis.market_size_and_drivers,
-            competitor_analysis_context=serialize_competitor_analysis(competitor_analysis),
-            business_score=due_diligence.business.business_score,
-            financial_health_summary=due_diligence.financial.financial_health_summary,
-            team_rating=due_diligence.team.capability_rating,
-            legal_risk_level=due_diligence.legal.legal_risk_level,
-            search_text=search_text[:6000] or "(无检索结果)",
+    due_diligence_coverage = (
+        f"已执行专项尽调：{'、'.join(due_diligence.completed_categories) or '无'}\n"
+        f"未执行专项尽调：{'、'.join(due_diligence.missing_categories) or '无'}"
+    )
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "funding_round": project_input.funding_round or "未提供",
+        "funding_amount": project_input.funding_amount or "未提供",
+        "industry": project_input.industry or "未提供",
+        "core_business": project_overview.core_business,
+        "product_service_system": project_overview.product_service_system,
+        "use_cases_and_value": project_overview.use_cases_and_value,
+        "weighting_note": weighting_note,
+        "industry_summary": industry_analysis.market_size_and_drivers,
+        "competitor_analysis_context": serialize_competitor_analysis(competitor_analysis),
+        "due_diligence_coverage": due_diligence_coverage,
+        "business_score": due_diligence.business.business_score if due_diligence.business else "未执行业务尽调",
+        "financial_health_summary": (
+            due_diligence.financial.financial_health_summary if due_diligence.financial else "未执行财务尽调"
         ),
+        "team_rating": due_diligence.team.capability_rating if due_diligence.team else "未执行团队尽调",
+        "legal_risk_level": due_diligence.legal.legal_risk_level if due_diligence.legal else "未执行法律尽调",
+        "search_text": search_text[:6000] or "(无检索结果)",
+    }
+    result = client.complete_json(
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _ValuationLLM,
+        context=llm_context(llm_config),
     )
 
     meta = result.meta.to_meta(sources)
+    if due_diligence.missing_categories:
+        meta.confidence = "low"
+        meta.missing_info = list(
+            dict.fromkeys(
+                meta.missing_info
+                + [f"未执行{category}尽调" for category in due_diligence.missing_categories]
+            )
+        )
     markdown = _render_markdown(project_input.company_name, weighting_note, result) + render_meta_section(meta)
 
     return ValuationAnalysis(

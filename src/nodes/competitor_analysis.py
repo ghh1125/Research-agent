@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.report import render_meta_section
 from src.schema import (
     CompetitorAnalysis,
@@ -148,6 +149,8 @@ def run_competitor_analysis(
     search_max_results: int = 4,
     feedback: str | None = None,
     current_analysis: CompetitorAnalysis | None = None,
+    single_llm_config: LLMCallConfig | None = None,
+    synthesis_llm_config: LLMCallConfig | None = None,
 ) -> CompetitorAnalysis:
     """Analyze each selected competitor sequentially, then synthesize one matrix report."""
 
@@ -172,32 +175,34 @@ def run_competitor_analysis(
             queries.append(f"{candidate.name} {feedback.strip()}")
         evidence_text, sources = collect_evidence(search, queries, category="competitor_analysis", max_results=search_max_results)
         try:
-            result = client.complete_json(
-                _SINGLE_PROMPT.format(
-                    company_name=project_input.company_name,
-                    website=project_input.website or "未提供",
-                    industry=project_input.industry or "未提供",
-                    core_business=project_overview.core_business,
-                    product_service=project_overview.product_service_system,
-                    use_cases_and_value=project_overview.use_cases_and_value,
-                    competitive_landscape=industry_analysis.competitive_landscape,
-                    opportunities_and_barriers=industry_analysis.opportunities_and_barriers,
-                    opportunity_mapping_to_target=industry_analysis.opportunity_mapping_to_target,
-                    candidate_id=candidate.id,
-                    candidate_name=candidate.name,
-                    candidate_website=candidate.website or "未提供",
-                    relationship=candidate.relationship,
-                    candidate_product=candidate.product_or_service,
-                    candidate_reason=candidate.reason,
-                    evidence_text=evidence_text or "(无检索结果)",
-                    current_result=(
-                        current_results[candidate.id].model_dump_json(indent=2)
-                        if candidate.id in current_results
-                        else "无"
-                    ),
-                    feedback=feedback.strip() if feedback and feedback.strip() else "无",
+            prompt_values = {
+                "company_name": project_input.company_name,
+                "website": project_input.website or "未提供",
+                "industry": project_input.industry or "未提供",
+                "core_business": project_overview.core_business,
+                "product_service": project_overview.product_service_system,
+                "use_cases_and_value": project_overview.use_cases_and_value,
+                "competitive_landscape": industry_analysis.competitive_landscape,
+                "opportunities_and_barriers": industry_analysis.opportunities_and_barriers,
+                "opportunity_mapping_to_target": industry_analysis.opportunity_mapping_to_target,
+                "candidate_id": candidate.id,
+                "candidate_name": candidate.name,
+                "candidate_website": candidate.website or "未提供",
+                "relationship": candidate.relationship,
+                "candidate_product": candidate.product_or_service,
+                "candidate_reason": candidate.reason,
+                "evidence_text": evidence_text or "(无检索结果)",
+                "current_result": (
+                    current_results[candidate.id].model_dump_json(indent=2)
+                    if candidate.id in current_results
+                    else "无"
                 ),
+                "feedback": feedback.strip() if feedback and feedback.strip() else "无",
+            }
+            result = client.complete_json(
+                render_prompt(_SINGLE_PROMPT, prompt_values, single_llm_config),
                 _SingleCompetitorAnalysisLLM,
+                context=llm_context(single_llm_config),
             )
         except Exception as exc:
             raise RuntimeError(f"竞品“{candidate.name}”分析失败：{exc}") from exc
@@ -221,6 +226,7 @@ def run_competitor_analysis(
         individual_results,
         llm_client=client,
         feedback=feedback,
+        llm_config=synthesis_llm_config,
     )
 
 
@@ -233,6 +239,7 @@ def synthesize_competitor_analysis(
     llm_client: RealLLMClient | None = None,
     feedback: str | None = None,
     current_analysis: CompetitorAnalysis | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> CompetitorAnalysis:
     if not individual_results:
         raise ValueError("缺少逐家竞品结构化结果，无法汇总")
@@ -254,22 +261,24 @@ def synthesize_competitor_analysis(
         )
 
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "industry": project_input.industry or "未提供",
+        "core_business": project_overview.core_business,
+        "product_service": project_overview.product_service_system,
+        "use_cases_and_value": project_overview.use_cases_and_value,
+        "competitive_landscape": industry_analysis.competitive_landscape,
+        "opportunities_and_barriers": industry_analysis.opportunities_and_barriers,
+        "opportunity_mapping_to_target": industry_analysis.opportunity_mapping_to_target,
+        "individual_results_json": _individual_results_json(individual_results),
+        "capability_matrix_json": str(matrix),
+        "current_summary": current_summary,
+        "feedback": feedback.strip() if feedback and feedback.strip() else "无",
+    }
     result = client.complete_json(
-        _SYNTHESIS_PROMPT.format(
-            company_name=project_input.company_name,
-            industry=project_input.industry or "未提供",
-            core_business=project_overview.core_business,
-            product_service=project_overview.product_service_system,
-            use_cases_and_value=project_overview.use_cases_and_value,
-            competitive_landscape=industry_analysis.competitive_landscape,
-            opportunities_and_barriers=industry_analysis.opportunities_and_barriers,
-            opportunity_mapping_to_target=industry_analysis.opportunity_mapping_to_target,
-            individual_results_json=_individual_results_json(individual_results),
-            capability_matrix_json=str(matrix),
-            current_summary=current_summary,
-            feedback=feedback.strip() if feedback and feedback.strip() else "无",
-        ),
+        render_prompt(_SYNTHESIS_PROMPT, prompt_values, llm_config),
         _CompetitorSynthesisLLM,
+        context=llm_context(llm_config),
     )
 
     sources = _dedupe_sources([source for item in individual_results for source in item.meta.sources])

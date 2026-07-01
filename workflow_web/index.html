@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>投研工作流编辑器</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>投研工作流</h1>
+      <p>编辑节点后一次运行，人工检查点会暂停等待确认。</p>
+      <p class="run-preparation">请在运行前完成所有节点配置：节点、连线、文件、模型和 Prompt。运行开始后不能更改画布和节点配置。</p>
+    </div>
+    <div class="topbar-actions">
+      <button id="load-default" type="button">恢复默认</button>
+      <button id="validate-workflow" type="button">校验</button>
+      <button id="run-workflow" class="primary" type="button">运行工作流</button>
+    </div>
+  </header>
+
+  <section class="credentials" aria-label="运行凭据">
+    <label>DashScope API Key<input id="dashscope-key" type="password" autocomplete="off"></label>
+    <label>Serper API Key<input id="serper-key" type="password" autocomplete="off"></label>
+    <span>仅用于本次运行，不写入工作流和运行记录。</span>
+  </section>
+
+  <main class="workspace">
+    <aside class="palette-panel">
+      <h2>节点</h2>
+      <div id="palette" class="palette"></div>
+    </aside>
+
+    <section class="canvas-shell">
+      <div class="canvas-toolbar">
+        <span id="connection-hint">点击左侧节点新增，也可拖入画布；点击节点右侧圆点，再点击目标节点左侧圆点完成连线。</span>
+        <span id="snapshot-notice" hidden>当前运行使用启动时的工作流快照，完成后才能编辑画布。</span>
+        <button id="cancel-connect" type="button" hidden>取消连线</button>
+      </div>
+      <div id="canvas" class="canvas" tabindex="0">
+        <svg id="edge-layer" aria-hidden="true"></svg>
+        <div id="node-layer"></div>
+      </div>
+    </section>
+
+    <aside id="config-panel" class="config-panel">
+      <h2>节点配置</h2>
+      <div id="config-content" class="empty-state">选择画布中的节点。</div>
+    </aside>
+  </main>
+
+  <section class="run-area">
+    <div class="run-status">
+      <h2>运行状态</h2>
+      <div id="run-summary">尚未运行</div>
+      <div id="node-statuses"></div>
+    </div>
+    <div id="checkpoint-panel" class="checkpoint-panel" hidden>
+      <h2>等待人工操作</h2>
+      <div id="checkpoint-content"></div>
+    </div>
+    <div id="report-panel" class="report-panel">
+      <h2>报告</h2>
+      <div id="report-content" class="empty-state">运行产生的报告会显示在这里。</div>
+    </div>
+  </section>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.report import render_meta_section
 from src.schema import NodeMetaJudgment, ProjectInput, ProjectOverview, IndustryAnalysis
 from src.search import RealSearchClient, collect_evidence
@@ -56,6 +57,7 @@ def run_industry_analysis(
     search_client: RealSearchClient | None = None,
     search_max_results: int = 5,
     feedback: str | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> IndustryAnalysis:
     """Node 2 — 行业深度分析. `feedback` carries a human reviewer's correction request for a
     regeneration pass; omit it for the first pass."""
@@ -73,16 +75,18 @@ def run_industry_analysis(
     feedback_section = f"人工复核反馈（这是对上一版本的修改要求，必须按这个反馈调整，不要忽略）：\n{feedback}" if feedback else ""
 
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "industry": industry,
+        "core_business": project_overview.core_business,
+        "product_and_scene": project_overview.use_cases_and_value,
+        "search_text": search_text[:7000] or "(无检索结果)",
+        "feedback_section": feedback_section,
+    }
     result = client.complete_json(
-        _PROMPT.format(
-            company_name=project_input.company_name,
-            industry=industry,
-            core_business=project_overview.core_business,
-            product_and_scene=project_overview.use_cases_and_value,
-            search_text=search_text[:7000] or "(无检索结果)",
-            feedback_section=feedback_section,
-        ),
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _IndustryAnalysisLLM,
+        context=llm_context(llm_config),
     )
 
     meta = result.meta.to_meta(sources)

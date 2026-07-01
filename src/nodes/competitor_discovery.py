@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.schema import CompetitorCandidate, CompetitorDiscovery, IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, Source
 from src.search import RealSearchClient, collect_evidence
 
@@ -56,6 +57,7 @@ def run_competitor_discovery(
     llm_client: RealLLMClient | None = None,
     search_client: RealSearchClient | None = None,
     search_max_results: int = 5,
+    llm_config: LLMCallConfig | None = None,
 ) -> CompetitorDiscovery:
     """Node 3.1 — 竞品发现 (longlist, before user selection)."""
 
@@ -68,16 +70,18 @@ def run_competitor_discovery(
     search_text, sources = collect_evidence(search_client, queries, category="competitor_discovery", max_results=search_max_results)
 
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "core_business": project_overview.core_business,
+        "product_service": project_overview.product_service_system,
+        "industry": project_input.industry or "未提供",
+        "competitive_landscape": industry_analysis.competitive_landscape,
+        "search_text": search_text[:7000] or "(无检索结果)",
+    }
     result = client.complete_json(
-        _PROMPT.format(
-            company_name=project_input.company_name,
-            core_business=project_overview.core_business,
-            product_service=project_overview.product_service_system,
-            industry=project_input.industry or "未提供",
-            competitive_landscape=industry_analysis.competitive_landscape,
-            search_text=search_text[:7000] or "(无检索结果)",
-        ),
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _CompetitorDiscoveryLLM,
+        context=llm_context(llm_config),
     )
 
     candidates = [

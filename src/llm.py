@@ -102,7 +102,12 @@ class RealLLMClient:
         context: dict[str, Any] | None = None,
     ) -> T:
         explicit_model = self._explicit_model(context)
-        candidates = self.provider_candidates(explicit_model=explicit_model)
+        explicit_provider = self._explicit_provider(context)
+        candidates = (
+            self._provider(explicit_provider, explicit_model=explicit_model)
+            if explicit_provider
+            else self.provider_candidates(explicit_model=explicit_model)
+        )
         if not candidates:
             raise RuntimeError("No configured LLM provider. Set DASHSCOPE_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, or DEEPSEEK_API_KEY.")
         schema_text = json.dumps(schema.model_json_schema(), ensure_ascii=False)
@@ -147,7 +152,13 @@ class RealLLMClient:
         from openai import OpenAI
 
         client = OpenAI(api_key=provider.api_key, base_url=provider.base_url, timeout=self.settings.llm_timeout_seconds, max_retries=0)
-        kwargs = {"model": provider.model, "messages": messages, "temperature": 0.2}
+        kwargs = {"model": provider.model, "messages": messages}
+        if provider.name != "dashscope" or provider.model.startswith(("qwen",)):
+            kwargs["temperature"] = 0.2
+        if provider.name == "dashscope" and provider.model.startswith(
+            ("qwen3.5", "qwen3.6", "qwen3.7", "deepseek-v4", "glm-5.", "kimi-k2.6")
+        ):
+            kwargs["extra_body"] = {"enable_thinking": False}
         try:
             response = client.chat.completions.create(**kwargs, response_format={"type": "json_object"})
         except Exception as exc:
@@ -161,6 +172,17 @@ class RealLLMClient:
             return None
         explicit = context.get("model") or context.get("explicit_model")
         return explicit.strip() if isinstance(explicit, str) and explicit.strip() else None
+
+    def _explicit_provider(self, context: dict[str, Any] | None) -> str | None:
+        if not context:
+            return None
+        explicit = context.get("provider")
+        if not isinstance(explicit, str) or not explicit.strip():
+            return None
+        provider = explicit.strip().lower()
+        if provider not in {"dashscope", "openai", "openrouter", "deepseek"}:
+            raise ValueError(f"Unsupported LLM provider: {provider}")
+        return provider
 
     def _provider_order(self) -> list[str]:
         if self.settings.llm_provider and self.settings.llm_provider != "auto":

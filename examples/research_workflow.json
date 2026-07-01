@@ -1,0 +1,37 @@
+{
+  "name": "默认投研工作流",
+  "nodes": [
+    {"id": "start-1", "type": "start", "x": 60, "y": 180, "config": {}},
+    {"id": "overview-1", "type": "projectOverview", "x": 300, "y": 180, "config": {}},
+    {"id": "industry-1", "type": "industryAnalysis", "x": 540, "y": 180, "config": {}},
+    {"id": "discovery-1", "type": "competitorDiscovery", "x": 780, "y": 180, "config": {}},
+    {"id": "competitor-1", "type": "competitorAnalysis", "x": 1020, "y": 180, "config": {}},
+    {"id": "dd-1", "type": "deepDueDiligence", "x": 1260, "y": 180, "config": {}},
+    {"id": "valuation-1", "type": "valuationAnalysis", "x": 1500, "y": 180, "config": {}},
+    {"id": "final-1", "type": "finalReport", "x": 1740, "y": 180, "config": {}}
+  ],
+  "edges": [
+    {"source": "start-1", "target": "overview-1"},
+    {"source": "overview-1", "target": "industry-1"},
+    {"source": "industry-1", "target": "discovery-1"},
+    {"source": "discovery-1", "target": "competitor-1"},
+    {"source": "competitor-1", "target": "dd-1"},
+    {"source": "dd-1", "target": "valuation-1"},
+    {"source": "valuation-1", "target": "final-1"}
+  ],
+  "availableNodeTypes": [
+    "start",
+    "projectOverview",
+    "industryAnalysis",
+    "competitorDiscovery",
+    "competitorAnalysis",
+    "deepDueDiligence",
+    "teamDueDiligence",
+    "businessDueDiligence",
+    "financialDueDiligence",
+    "techIpDueDiligence",
+    "legalDueDiligence",
+    "valuationAnalysis",
+    "finalReport"
+  ]
+}

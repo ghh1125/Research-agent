@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.nodes.competitor_analysis import serialize_competitor_analysis
 from src.report import render_meta_section
 from src.schema import (
@@ -29,6 +30,9 @@ _PROMPT = """\
 完整竞品分析对象：
 {competitor_analysis_context}
 估值要点：{valuation_brief}
+
+尽调覆盖范围：
+{due_diligence_coverage}
 
 团队尽调：{team_summary}
 业务尽调：{business_summary}
@@ -72,6 +76,7 @@ def run_final_report(
     valuation_analysis: ValuationAnalysis,
     *,
     llm_client: RealLLMClient | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> FinalInvestmentReport:
     """Node 6 — 综合研判与报告输出.
 
@@ -81,40 +86,69 @@ def run_final_report(
     """
 
     client = llm_client or RealLLMClient()
-    result = client.complete_json(
-        _PROMPT.format(
-            company_name=project_input.company_name,
-            funding_round=project_input.funding_round or "未提供",
-            funding_amount=project_input.funding_amount or "未提供",
-            overview_brief=project_overview.core_business,
-            industry_brief=industry_analysis.opportunity_mapping_to_target,
-            competitor_analysis_context=serialize_competitor_analysis(competitor_analysis),
-            valuation_brief=valuation_analysis.risk_adjusted_range,
-            team_summary=due_diligence.team.key_person_risk + " | " + due_diligence.team.capability_rating,
-            business_summary=due_diligence.business.business_model_analysis + " | 评分:" + due_diligence.business.business_score,
-            financial_summary=due_diligence.financial.financial_health_summary,
-            tech_ip_summary=due_diligence.tech_ip.core_tech_barrier,
-            legal_summary=due_diligence.legal.legal_risk_level,
-            risk_register=[item.model_dump() for item in due_diligence.risk_register],
+    due_diligence_coverage = (
+        f"已执行专项尽调：{'、'.join(due_diligence.completed_categories) or '无'}\n"
+        f"未执行专项尽调：{'、'.join(due_diligence.missing_categories) or '无'}"
+    )
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "funding_round": project_input.funding_round or "未提供",
+        "funding_amount": project_input.funding_amount or "未提供",
+        "overview_brief": project_overview.core_business,
+        "industry_brief": industry_analysis.opportunity_mapping_to_target,
+        "competitor_analysis_context": serialize_competitor_analysis(competitor_analysis),
+        "valuation_brief": valuation_analysis.risk_adjusted_range,
+        "due_diligence_coverage": due_diligence_coverage,
+        "team_summary": (
+            due_diligence.team.key_person_risk + " | " + due_diligence.team.capability_rating
+            if due_diligence.team
+            else "未执行团队尽调"
         ),
+        "business_summary": (
+            due_diligence.business.business_model_analysis + " | 评分:" + due_diligence.business.business_score
+            if due_diligence.business
+            else "未执行业务尽调"
+        ),
+        "financial_summary": (
+            due_diligence.financial.financial_health_summary
+            if due_diligence.financial
+            else "未执行财务尽调"
+        ),
+        "tech_ip_summary": (
+            due_diligence.tech_ip.core_tech_barrier
+            if due_diligence.tech_ip
+            else "未执行技术与知识产权尽调"
+        ),
+        "legal_summary": due_diligence.legal.legal_risk_level if due_diligence.legal else "未执行法律尽调",
+        "risk_register": [item.model_dump() for item in due_diligence.risk_register],
+    }
+    result = client.complete_json(
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _FinalReportLLM,
+        context=llm_context(llm_config),
     )
 
     all_sources = list(project_overview.meta.sources) + list(industry_analysis.meta.sources) + list(competitor_analysis.meta.sources) + list(valuation_analysis.meta.sources) + list(due_diligence.evidence_index)
     all_assumptions = list(industry_analysis.key_assumptions) + list(valuation_analysis.key_assumptions)
+    specialist_reports = [
+        due_diligence.team,
+        due_diligence.business,
+        due_diligence.financial,
+        due_diligence.tech_ip,
+        due_diligence.legal,
+    ]
     all_missing_info = (
         list(project_overview.meta.missing_info)
         + list(industry_analysis.meta.missing_info)
         + list(competitor_analysis.meta.missing_info)
         + list(valuation_analysis.meta.missing_info)
-        + list(due_diligence.team.meta.missing_info)
-        + list(due_diligence.business.meta.missing_info)
-        + list(due_diligence.financial.meta.missing_info)
-        + list(due_diligence.tech_ip.meta.missing_info)
-        + list(due_diligence.legal.meta.missing_info)
+        + [item for report in specialist_reports if report is not None for item in report.meta.missing_info]
+        + [f"未执行{category}尽调" for category in due_diligence.missing_categories]
     )
     meta = result.meta.to_meta(all_sources)
     meta.missing_info = list(dict.fromkeys(all_missing_info + meta.missing_info))
+    if due_diligence.missing_categories:
+        meta.confidence = "low"
 
     report = FinalInvestmentReport(
         investment_summary=result.investment_summary,

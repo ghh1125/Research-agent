@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.report import render_meta_section
 from src.schema import FounderProfile, NodeMetaJudgment, ProjectInput, ProjectOverview
 from src.search import RealSearchClient, collect_evidence
@@ -57,6 +58,7 @@ def run_project_overview(
     search_client: RealSearchClient | None = None,
     search_max_results: int = 5,
     feedback: str | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> ProjectOverview:
     """Node 1 — 项目基本概况. `feedback` carries a human reviewer's correction request for a
     regeneration pass (e.g. "公司注册信息那段写错了，再确认一下"); omit it for the first pass."""
@@ -72,17 +74,19 @@ def run_project_overview(
     feedback_section = f"人工复核反馈（这是对上一版本的修改要求，必须按这个反馈调整，不要忽略）：\n{feedback}" if feedback else ""
 
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "website": project_input.website or "未提供",
+        "industry": project_input.industry or "未提供",
+        "project_description": project_input.project_description or "未提供",
+        "bp_text": project_input.bp_parsed_content[:4000] or "(无)",
+        "search_text": search_text[:6000] or "(无检索结果)",
+        "feedback_section": feedback_section,
+    }
     result = client.complete_json(
-        _PROMPT.format(
-            company_name=project_input.company_name,
-            website=project_input.website or "未提供",
-            industry=project_input.industry or "未提供",
-            project_description=project_input.project_description or "未提供",
-            bp_text=project_input.bp_parsed_content[:4000] or "(无)",
-            search_text=search_text[:6000] or "(无检索结果)",
-            feedback_section=feedback_section,
-        ),
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _ProjectOverviewLLM,
+        context=llm_context(llm_config),
     )
 
     markdown = _render_markdown(project_input.company_name, result)

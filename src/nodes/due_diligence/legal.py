@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.report import render_meta_section
 from src.schema import IndustryAnalysis, LegalDueDiligence, NodeMetaJudgment, ProjectInput, ProjectOverview, RiskLevel
 
@@ -50,6 +51,7 @@ def run_legal_due_diligence(
     legal_files: list[str] | None = None,
     llm_client: RealLLMClient | None = None,
     peer_findings: str | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> LegalDueDiligence:
     """Node 4 sub-report — 法律法规尽调. peer_findings typically carries 团队/业务/财务尽调 preliminary
     findings so legal risk judgment accounts for cross-domain signals (e.g. cash flow risk -> compliance risk)."""
@@ -58,16 +60,18 @@ def run_legal_due_diligence(
     legal_file_text = truncate("\n\n".join(p.text for p in parsed if p.text), 8000)
 
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "industry": project_input.industry or "未提供",
+        "registration_info": project_overview.company_registration_info,
+        "policy_environment": industry_analysis.policy_environment,
+        "legal_file_text": legal_file_text or "(用户未上传法律文件)",
+        "peer_findings": peer_findings or "(暂无其他尽调维度的初步发现)",
+    }
     result = client.complete_json(
-        _PROMPT.format(
-            company_name=project_input.company_name,
-            industry=project_input.industry or "未提供",
-            registration_info=project_overview.company_registration_info,
-            policy_environment=industry_analysis.policy_environment,
-            legal_file_text=legal_file_text or "(用户未上传法律文件)",
-            peer_findings=peer_findings or "(暂无其他尽调维度的初步发现)",
-        ),
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _LegalLLM,
+        context=llm_context(llm_config),
     )
 
     meta = result.meta.to_meta([])

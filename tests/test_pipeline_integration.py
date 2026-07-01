@@ -76,6 +76,38 @@ def test_after_competitor_analysis_does_not_regenerate_competitor_report(
     assert "_CompetitorAnalysisLLM" not in fake_llm_client.calls
 
 
+def test_due_diligence_stage_can_run_without_valuation_or_final_report(
+    tmp_path: Path, fake_llm_client, fake_search_client
+) -> None:
+    pipeline = BPPipeline(
+        config=BPPipelineConfig(output_dir=tmp_path / "reports", search_max_results=1),
+        llm_client=fake_llm_client,
+        search_client=fake_search_client,
+    )
+    project_input, overview, industry, discovery = pipeline.run_intake_through_discovery(
+        company_name="示例科技", industry="人工智能", project_description="企业级 AI 软件"
+    )
+    competitor_report = pipeline.run_competitor_analysis_step(
+        project_input=project_input,
+        project_overview=overview,
+        industry_analysis=industry,
+        discovery=discovery,
+        selected_ids=[discovery.candidates[0].id],
+    )
+    fake_llm_client.calls.clear()
+
+    due_diligence = pipeline.run_due_diligence_step(
+        project_input=project_input,
+        project_overview=overview,
+        industry_analysis=industry,
+        competitor_analysis=competitor_report,
+    )
+
+    assert due_diligence.markdown
+    assert "_ValuationLLM" not in fake_llm_client.calls
+    assert "_FinalReportLLM" not in fake_llm_client.calls
+
+
 def test_feedback_resynthesis_reuses_individual_results_without_search(tmp_path: Path, fake_llm_client, fake_search_client) -> None:
     pipeline = BPPipeline(
         config=BPPipelineConfig(output_dir=tmp_path / "reports", search_max_results=1),

@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.report import render_meta_section
 from src.schema import IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, RiskNote, TechIPDueDiligence
 
@@ -48,6 +49,7 @@ def run_tech_ip_due_diligence(
     tech_ip_files: list[str] | None = None,
     llm_client: RealLLMClient | None = None,
     peer_findings: str | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> TechIPDueDiligence:
     """Node 4 sub-report — 技术与知识产权尽调. peer_findings typically carries 团队尽调 preliminary findings
     so the R&D team assessment can cross-check the team capability rating."""
@@ -56,16 +58,18 @@ def run_tech_ip_due_diligence(
     tech_file_text = truncate("\n\n".join(p.text for p in parsed if p.text), 8000)
 
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "company_name": project_input.company_name,
+        "industry": project_input.industry or "未提供",
+        "product_service": project_overview.product_service_system,
+        "competitive_landscape": industry_analysis.competitive_landscape,
+        "tech_file_text": tech_file_text or "(用户未上传技术与知识产权资料)",
+        "peer_findings": peer_findings or "(暂无其他尽调维度的初步发现)",
+    }
     result = client.complete_json(
-        _PROMPT.format(
-            company_name=project_input.company_name,
-            industry=project_input.industry or "未提供",
-            product_service=project_overview.product_service_system,
-            competitive_landscape=industry_analysis.competitive_landscape,
-            tech_file_text=tech_file_text or "(用户未上传技术与知识产权资料)",
-            peer_findings=peer_findings or "(暂无其他尽调维度的初步发现)",
-        ),
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _TechIPLLM,
+        context=llm_context(llm_config),
     )
 
     meta = result.meta.to_meta([])

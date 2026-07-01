@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from src.files import parse_files, truncate
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig, llm_context, render_prompt
 from src.report import render_meta_section
 from src.schema import FinancialDueDiligence, FinancialRatios, IndustryAnalysis, NodeMetaJudgment, ProjectInput, ProjectOverview, RiskNote
 
@@ -145,6 +146,7 @@ def run_financial_due_diligence(
     *,
     financial_files: list[str] | None = None,
     llm_client: RealLLMClient | None = None,
+    llm_config: LLMCallConfig | None = None,
 ) -> FinancialDueDiligence:
     """Node 4 sub-report — 财务尽调. Ratios are computed deterministically in Python; the LLM only interprets."""
 
@@ -153,23 +155,25 @@ def run_financial_due_diligence(
     financial_file_text = truncate("\n\n".join(p.text for p in parsed if p.text and not p.sheets), 4000)
 
     client = llm_client or RealLLMClient()
+    prompt_values = {
+        "revenue": ratios.revenue or "无数据",
+        "cost": ratios.cost or "无数据",
+        "gross_margin": ratios.gross_margin_pct,
+        "net_margin": ratios.net_margin_pct,
+        "ocf": ratios.operating_cash_flow,
+        "yoy": ratios.revenue_yoy_growth_pct,
+        "computed_from": ratios.computed_from,
+        "company_name": project_input.company_name,
+        "funding_round": project_input.funding_round or "未提供",
+        "funding_amount": project_input.funding_amount or "未提供",
+        "core_business": project_overview.core_business,
+        "market_size_and_drivers": industry_analysis.market_size_and_drivers,
+        "financial_file_text": financial_file_text or "(无补充文本)",
+    }
     result = client.complete_json(
-        _PROMPT.format(
-            revenue=ratios.revenue or "无数据",
-            cost=ratios.cost or "无数据",
-            gross_margin=ratios.gross_margin_pct,
-            net_margin=ratios.net_margin_pct,
-            ocf=ratios.operating_cash_flow,
-            yoy=ratios.revenue_yoy_growth_pct,
-            computed_from=ratios.computed_from,
-            company_name=project_input.company_name,
-            funding_round=project_input.funding_round or "未提供",
-            funding_amount=project_input.funding_amount or "未提供",
-            core_business=project_overview.core_business,
-            market_size_and_drivers=industry_analysis.market_size_and_drivers,
-            financial_file_text=financial_file_text or "(无补充文本)",
-        ),
+        render_prompt(_PROMPT, prompt_values, llm_config),
         _FinancialLLM,
+        context=llm_context(llm_config),
     )
 
     meta = result.meta.to_meta([])

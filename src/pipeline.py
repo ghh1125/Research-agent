@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from pydantic import BaseModel, Field
 
 from src.llm import RealLLMClient
+from src.llm_config import LLMCallConfig
 from src.nodes.competitor_analysis import run_competitor_analysis, synthesize_competitor_analysis
 from src.nodes.competitor_discovery import run_competitor_discovery
 from src.nodes.due_diligence import (
@@ -43,6 +44,11 @@ CompetitorSelector = Callable[[CompetitorDiscovery], list[str]]
 # Given the freshly generated report, return None to approve/continue, or a feedback string to
 # regenerate that same step with the feedback folded into the prompt.
 ReviewCallback = Callable[[Any], "str | None"]
+LLMStepConfigs = Mapping[str, LLMCallConfig]
+
+
+def _llm_step(configs: LLMStepConfigs | None, key: str) -> LLMCallConfig | None:
+    return configs.get(key) if configs else None
 
 
 def select_all_competitors(discovery: CompetitorDiscovery) -> list[str]:
@@ -108,6 +114,7 @@ class BPPipeline:
         funding_amount: str | None = None,
         industry: str | None = None,
         project_description: str | None = None,
+        llm_config: LLMCallConfig | None = None,
     ) -> ProjectInput:
         """Node 0 — 开始. No review checkpoint after this one (it's just intake normalization)."""
 
@@ -121,29 +128,45 @@ class BPPipeline:
             industry=industry,
             project_description=project_description,
             llm_client=self.llm_client,
+            llm_config=llm_config,
         )
         self._emit("[node 0/7] 开始 done")
         return project_input
 
-    def run_project_overview_step(self, project_input: ProjectInput, *, feedback: str | None = None) -> ProjectOverview:
+    def run_project_overview_step(
+        self,
+        project_input: ProjectInput,
+        *,
+        feedback: str | None = None,
+        llm_config: LLMCallConfig | None = None,
+    ) -> ProjectOverview:
         """Node 1 — 项目基本概况. Pass `feedback` to regenerate after a human review rejects the first pass."""
 
         self._emit("[node 1/7] 项目基本概况 start" + (" (按反馈重新生成)" if feedback else ""))
         overview = run_project_overview(
-            project_input, llm_client=self.llm_client, search_client=self.search_client, search_max_results=self.config.search_max_results, feedback=feedback
+            project_input,
+            llm_client=self.llm_client,
+            search_client=self.search_client,
+            search_max_results=self.config.search_max_results,
+            feedback=feedback,
+            llm_config=llm_config,
         )
         self._emit("[node 1/7] 项目基本概况 done")
         return overview
 
     def run_project_overview_with_review(
-        self, project_input: ProjectInput, *, review_callback: ReviewCallback | None = None
+        self,
+        project_input: ProjectInput,
+        *,
+        review_callback: ReviewCallback | None = None,
+        llm_config: LLMCallConfig | None = None,
     ) -> ProjectOverview:
         """CLI-style convenience: loops `run_project_overview_step` until `review_callback` approves
         (returns None) or there is no callback at all (auto-approve, used by non-interactive callers)."""
 
         feedback: str | None = None
         while True:
-            overview = self.run_project_overview_step(project_input, feedback=feedback)
+            overview = self.run_project_overview_step(project_input, feedback=feedback, llm_config=llm_config)
             if review_callback is None:
                 return overview
             feedback = review_callback(overview)
@@ -151,7 +174,12 @@ class BPPipeline:
                 return overview
 
     def run_industry_analysis_step(
-        self, project_input: ProjectInput, project_overview: ProjectOverview, *, feedback: str | None = None
+        self,
+        project_input: ProjectInput,
+        project_overview: ProjectOverview,
+        *,
+        feedback: str | None = None,
+        llm_config: LLMCallConfig | None = None,
     ) -> IndustryAnalysis:
         """Node 2 — 行业深度分析. Pass `feedback` to regenerate after a human review rejects the first pass."""
 
@@ -163,19 +191,30 @@ class BPPipeline:
             search_client=self.search_client,
             search_max_results=self.config.search_max_results,
             feedback=feedback,
+            llm_config=llm_config,
         )
         self._emit("[node 2/7] 行业深度分析 done")
         return analysis
 
     def run_industry_analysis_with_review(
-        self, project_input: ProjectInput, project_overview: ProjectOverview, *, review_callback: ReviewCallback | None = None
+        self,
+        project_input: ProjectInput,
+        project_overview: ProjectOverview,
+        *,
+        review_callback: ReviewCallback | None = None,
+        llm_config: LLMCallConfig | None = None,
     ) -> IndustryAnalysis:
         """CLI-style convenience: loops `run_industry_analysis_step` until approved (see
         `run_project_overview_with_review` for the same pattern)."""
 
         feedback: str | None = None
         while True:
-            analysis = self.run_industry_analysis_step(project_input, project_overview, feedback=feedback)
+            analysis = self.run_industry_analysis_step(
+                project_input,
+                project_overview,
+                feedback=feedback,
+                llm_config=llm_config,
+            )
             if review_callback is None:
                 return analysis
             feedback = review_callback(analysis)
@@ -183,13 +222,24 @@ class BPPipeline:
                 return analysis
 
     def run_competitor_discovery_step(
-        self, project_input: ProjectInput, project_overview: ProjectOverview, industry_analysis: IndustryAnalysis
+        self,
+        project_input: ProjectInput,
+        project_overview: ProjectOverview,
+        industry_analysis: IndustryAnalysis,
+        *,
+        llm_config: LLMCallConfig | None = None,
     ) -> CompetitorDiscovery:
         """Node 3.1 — 竞品发现 (longlist, before the 竞品确认 human-in-the-loop point)."""
 
         self._emit("[node 3.1/7] 竞品发现 start")
         discovery = run_competitor_discovery(
-            project_input, project_overview, industry_analysis, llm_client=self.llm_client, search_client=self.search_client, search_max_results=self.config.search_max_results
+            project_input,
+            project_overview,
+            industry_analysis,
+            llm_client=self.llm_client,
+            search_client=self.search_client,
+            search_max_results=self.config.search_max_results,
+            llm_config=llm_config,
         )
         self._emit(f"[node 3.1/7] 竞品发现 done candidates={len(discovery.candidates)}")
         return discovery
@@ -206,6 +256,7 @@ class BPPipeline:
         project_description: str | None = None,
         overview_review_callback: ReviewCallback | None = None,
         industry_review_callback: ReviewCallback | None = None,
+        llm_steps: LLMStepConfigs | None = None,
     ) -> tuple[ProjectInput, ProjectOverview, IndustryAnalysis, CompetitorDiscovery]:
         """Convenience wrapper chaining nodes 0, 1, 2, 3.1 with optional review loops on 1 and 2.
         Pass review_callback=None (the default) to auto-approve and run straight through."""
@@ -218,10 +269,25 @@ class BPPipeline:
             funding_amount=funding_amount,
             industry=industry,
             project_description=project_description,
+            llm_config=_llm_step(llm_steps, "start_normalization"),
         )
-        project_overview = self.run_project_overview_with_review(project_input, review_callback=overview_review_callback)
-        industry_analysis = self.run_industry_analysis_with_review(project_input, project_overview, review_callback=industry_review_callback)
-        discovery = self.run_competitor_discovery_step(project_input, project_overview, industry_analysis)
+        project_overview = self.run_project_overview_with_review(
+            project_input,
+            review_callback=overview_review_callback,
+            llm_config=_llm_step(llm_steps, "project_overview"),
+        )
+        industry_analysis = self.run_industry_analysis_with_review(
+            project_input,
+            project_overview,
+            review_callback=industry_review_callback,
+            llm_config=_llm_step(llm_steps, "industry_analysis"),
+        )
+        discovery = self.run_competitor_discovery_step(
+            project_input,
+            project_overview,
+            industry_analysis,
+            llm_config=_llm_step(llm_steps, "competitor_discovery"),
+        )
         return project_input, project_overview, industry_analysis, discovery
 
     def run_after_competitor_selection(
@@ -237,6 +303,7 @@ class BPPipeline:
         business_plan_files: list[str] | None = None,
         tech_ip_files: list[str] | None = None,
         legal_files: list[str] | None = None,
+        llm_steps: LLMStepConfigs | None = None,
     ) -> tuple[CompetitorAnalysis, DueDiligenceBundle, ValuationAnalysis, FinalInvestmentReport]:
         """Compatibility wrapper that runs nodes 3.2-6 without pausing."""
 
@@ -246,6 +313,8 @@ class BPPipeline:
             industry_analysis=industry_analysis,
             discovery=discovery,
             selected_ids=selected_ids,
+            single_llm_config=_llm_step(llm_steps, "competitor_single"),
+            synthesis_llm_config=_llm_step(llm_steps, "competitor_synthesis"),
         )
         due_diligence, valuation_analysis, final_report = self.run_after_competitor_analysis(
             project_input=project_input,
@@ -257,6 +326,7 @@ class BPPipeline:
             business_plan_files=business_plan_files,
             tech_ip_files=tech_ip_files,
             legal_files=legal_files,
+            llm_steps=llm_steps,
         )
         return competitor_analysis, due_diligence, valuation_analysis, final_report
 
@@ -270,6 +340,8 @@ class BPPipeline:
         selected_ids: list[str],
         feedback: str | None = None,
         current_analysis: CompetitorAnalysis | None = None,
+        single_llm_config: LLMCallConfig | None = None,
+        synthesis_llm_config: LLMCallConfig | None = None,
     ) -> CompetitorAnalysis:
         """Node 3.2 only: generate the report for the user's confirmed shortlist."""
 
@@ -286,6 +358,8 @@ class BPPipeline:
                 search_max_results=self.config.search_max_results,
                 feedback=feedback,
                 current_analysis=current_analysis,
+                single_llm_config=single_llm_config,
+                synthesis_llm_config=synthesis_llm_config,
             )
             self._emit("[node 3.2/7] 竞品矩阵分析 done")
             return competitor_analysis
@@ -299,6 +373,7 @@ class BPPipeline:
         industry_analysis: IndustryAnalysis,
         competitor_analysis: CompetitorAnalysis,
         feedback: str,
+        llm_config: LLMCallConfig | None = None,
     ) -> CompetitorAnalysis:
         """Re-synthesize the final competitor report without searching or re-running individual analyses."""
 
@@ -313,6 +388,7 @@ class BPPipeline:
             llm_client=self.llm_client,
             feedback=feedback.strip(),
             current_analysis=competitor_analysis,
+            llm_config=llm_config,
         )
         self._emit("[node 3.2/7] 竞品矩阵重新汇总 done")
         return result
@@ -329,32 +405,22 @@ class BPPipeline:
         business_plan_files: list[str] | None = None,
         tech_ip_files: list[str] | None = None,
         legal_files: list[str] | None = None,
+        llm_steps: LLMStepConfigs | None = None,
     ) -> tuple[DueDiligenceBundle, ValuationAnalysis, FinalInvestmentReport]:
         """Run nodes 4-6 using an already generated competitor report."""
 
-        self._emit("[node 4/7] 深度尽调 start")
-        team = run_team_due_diligence(
-            project_input, project_overview, industry_analysis, team_files=team_files, llm_client=self.llm_client, search_client=self.search_client
-        )
-        business = run_business_due_diligence(
-            project_input,
-            project_overview,
-            industry_analysis,
-            competitor_analysis,
+        due_diligence = self.run_due_diligence_step(
+            project_input=project_input,
+            project_overview=project_overview,
+            industry_analysis=industry_analysis,
+            competitor_analysis=competitor_analysis,
+            team_files=team_files,
+            financial_files=financial_files,
             business_plan_files=business_plan_files,
-            llm_client=self.llm_client,
-            peer_findings=summarize_team(team),
+            tech_ip_files=tech_ip_files,
+            legal_files=legal_files,
+            llm_steps=llm_steps,
         )
-        financial = run_financial_due_diligence(project_input, project_overview, industry_analysis, financial_files=financial_files, llm_client=self.llm_client)
-        peer_for_legal = "\n".join([summarize_team(team), summarize_business(business), summarize_financial(financial)])
-        legal = run_legal_due_diligence(
-            project_input, project_overview, industry_analysis, legal_files=legal_files, llm_client=self.llm_client, peer_findings=peer_for_legal
-        )
-        tech_ip = run_tech_ip_due_diligence(
-            project_input, project_overview, industry_analysis, tech_ip_files=tech_ip_files, llm_client=self.llm_client, peer_findings=summarize_team(team)
-        )
-        due_diligence = build_due_diligence_bundle(team, business, financial, tech_ip, legal)
-        self._emit(f"[node 4/7] 深度尽调 done risk_items={len(due_diligence.risk_register)}")
 
         self._emit("[node 5/7] 估值分析 start")
         valuation_analysis = run_valuation_analysis(
@@ -366,14 +432,91 @@ class BPPipeline:
             llm_client=self.llm_client,
             search_client=self.search_client,
             search_max_results=self.config.search_max_results,
+            llm_config=_llm_step(llm_steps, "valuation_analysis"),
         )
         self._emit("[node 5/7] 估值分析 done")
 
         self._emit("[node 6/7] 综合研判与报告输出 start")
-        final_report = run_final_report(project_input, project_overview, industry_analysis, competitor_analysis, due_diligence, valuation_analysis, llm_client=self.llm_client)
+        final_report = run_final_report(
+            project_input,
+            project_overview,
+            industry_analysis,
+            competitor_analysis,
+            due_diligence,
+            valuation_analysis,
+            llm_client=self.llm_client,
+            llm_config=_llm_step(llm_steps, "final_report"),
+        )
         self._emit("[node 6/7] 综合研判与报告输出 done")
 
         return due_diligence, valuation_analysis, final_report
+
+    def run_due_diligence_step(
+        self,
+        *,
+        project_input: ProjectInput,
+        project_overview: ProjectOverview,
+        industry_analysis: IndustryAnalysis,
+        competitor_analysis: CompetitorAnalysis,
+        team_files: list[str] | None = None,
+        financial_files: list[str] | None = None,
+        business_plan_files: list[str] | None = None,
+        tech_ip_files: list[str] | None = None,
+        legal_files: list[str] | None = None,
+        llm_steps: LLMStepConfigs | None = None,
+    ) -> DueDiligenceBundle:
+        """Node 4 only: run and aggregate all five due-diligence specialists."""
+
+        self._emit("[node 4/7] 深度尽调 start")
+        team = run_team_due_diligence(
+            project_input,
+            project_overview,
+            industry_analysis,
+            team_files=team_files,
+            llm_client=self.llm_client,
+            search_client=self.search_client,
+            llm_config=_llm_step(llm_steps, "team_due_diligence"),
+        )
+        business = run_business_due_diligence(
+            project_input,
+            project_overview,
+            industry_analysis,
+            competitor_analysis,
+            business_plan_files=business_plan_files,
+            llm_client=self.llm_client,
+            peer_findings=summarize_team(team),
+            llm_config=_llm_step(llm_steps, "business_due_diligence"),
+        )
+        financial = run_financial_due_diligence(
+            project_input,
+            project_overview,
+            industry_analysis,
+            financial_files=financial_files,
+            llm_client=self.llm_client,
+            llm_config=_llm_step(llm_steps, "financial_due_diligence"),
+        )
+        peer_for_legal = "\n".join([summarize_team(team), summarize_business(business), summarize_financial(financial)])
+        legal = run_legal_due_diligence(
+            project_input,
+            project_overview,
+            industry_analysis,
+            legal_files=legal_files,
+            llm_client=self.llm_client,
+            peer_findings=peer_for_legal,
+            llm_config=_llm_step(llm_steps, "legal_due_diligence"),
+        )
+        tech_ip = run_tech_ip_due_diligence(
+            project_input,
+            project_overview,
+            industry_analysis,
+            tech_ip_files=tech_ip_files,
+            llm_client=self.llm_client,
+            peer_findings=summarize_team(team),
+            llm_config=_llm_step(llm_steps, "tech_ip_due_diligence"),
+        )
+        due_diligence = build_due_diligence_bundle(team, business, financial, tech_ip, legal)
+        self._emit(f"[node 4/7] 深度尽调 done risk_items={len(due_diligence.risk_register)}")
+        return due_diligence
 
     def run(
         self,
