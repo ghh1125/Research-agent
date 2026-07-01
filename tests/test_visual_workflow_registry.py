@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.visual_workflow.registry import get_node_registry, validate_node_config
+from src.visual_workflow.registry import _llm_config, get_node_registry, validate_node_config
 
 
 def test_registry_exposes_all_research_node_types() -> None:
@@ -23,6 +23,13 @@ def test_registry_exposes_all_research_node_types() -> None:
         "valuationAnalysis",
         "finalReport",
     ]
+
+
+def test_unmodified_workflow_node_uses_catalog_default_model() -> None:
+    config = _llm_config({}, "project_overview")
+
+    assert config is not None
+    assert config.model == "qwen3.7-plus"
 
 
 def test_registry_describes_inputs_outputs_files_and_checkpoints() -> None:

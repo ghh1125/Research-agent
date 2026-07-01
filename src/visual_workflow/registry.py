@@ -149,7 +149,7 @@ def _llm_configs(config: dict[str, Any]) -> dict[str, LLMCallConfig]:
 
 
 def _llm_config(config: dict[str, Any], step_id: str) -> LLMCallConfig | None:
-    return _llm_configs(config).get(step_id)
+    return _llm_configs(config).get(step_id) or LLMCallConfig(model=DEFAULT_DASHSCOPE_MODEL)
 
 
 def validate_node_config(definition: NodeDefinition, config: dict[str, Any] | None) -> None:
