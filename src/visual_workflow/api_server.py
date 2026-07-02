@@ -24,6 +24,7 @@ from src.visual_workflow.registry import (
     validate_workflow_node_configs,
 )
 from src.visual_workflow.run_store import RunStore
+from src.visual_workflow.workflow_store import WorkflowStore, sanitize_workflow
 
 _API_KEY_FIELDS = {
     "openaiApiKey": "openai_api_key",
@@ -78,6 +79,7 @@ def create_server(
     example_path: Path | None = None,
     upload_root: Path | None = None,
     run_store: RunStore | None = None,
+    workflow_store: WorkflowStore | None = None,
 ) -> ThreadingHTTPServer:
     project_root = Path(__file__).resolve().parents[2]
     registry = registry or get_node_registry()
@@ -85,6 +87,7 @@ def create_server(
     example_path = Path(example_path or project_root / "examples" / "research_workflow.json").resolve()
     upload_root = Path(upload_root or project_root / "data" / "workflow_uploads").resolve()
     run_store = run_store or RunStore(WorkflowExecutor(registry))
+    workflow_store = workflow_store or WorkflowStore(project_root / "data" / "workflows.db")
 
     class WorkflowHandler(BaseHTTPRequestHandler):
         server_version = "ResearchWorkflowDemo/1.0"
@@ -96,6 +99,10 @@ def create_server(
                     self._json([item.to_catalog_item() for item in registry.values()])
                 elif parsed.path == "/api/examples/research-workflow":
                     self._json(json.loads(example_path.read_text(encoding="utf-8")))
+                elif parsed.path == "/api/workflows":
+                    self._json(workflow_store.list_workflows())
+                elif parsed.path.startswith("/api/workflows/"):
+                    self._json(workflow_store.get(self._workflow_id(parsed.path)))
                 elif parsed.path.startswith("/api/runs/"):
                     self._get_run_route(parsed)
                 else:
@@ -116,6 +123,14 @@ def create_server(
                     validate_workflow(workflow, registry.keys())
                     validate_workflow_node_configs(workflow, registry)
                     self._json({"valid": True, "order": topological_node_ids(workflow)})
+                elif parsed.path == "/api/workflows":
+                    workflow = self._validated_saved_workflow(payload)
+                    record = workflow_store.create(
+                        name=str(payload.get("name") or ""),
+                        description=str(payload.get("description") or ""),
+                        workflow=workflow,
+                    )
+                    self._json(record, HTTPStatus.CREATED)
                 elif parsed.path == "/api/runs":
                     workflow = payload.get("workflow") or {}
                     validate_workflow(workflow, registry.keys())
@@ -136,6 +151,40 @@ def create_server(
             except Exception as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
 
+        def do_PUT(self) -> None:  # noqa: N802
+            parsed = urlparse(self.path)
+            try:
+                if not parsed.path.startswith("/api/workflows/"):
+                    self._error(HTTPStatus.NOT_FOUND, "接口不存在")
+                    return
+                payload = self._read_json()
+                workflow = self._validated_saved_workflow(payload)
+                record = workflow_store.update(
+                    self._workflow_id(parsed.path),
+                    name=str(payload.get("name") or ""),
+                    description=str(payload.get("description") or ""),
+                    workflow=workflow,
+                )
+                self._json(record)
+            except KeyError as exc:
+                self._error(HTTPStatus.NOT_FOUND, str(exc))
+            except Exception as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            parsed = urlparse(self.path)
+            try:
+                if not parsed.path.startswith("/api/workflows/"):
+                    self._error(HTTPStatus.NOT_FOUND, "接口不存在")
+                    return
+                workflow_id = self._workflow_id(parsed.path)
+                workflow_store.delete(workflow_id)
+                self._json({"deleted": True, "id": workflow_id})
+            except KeyError as exc:
+                self._error(HTTPStatus.NOT_FOUND, str(exc))
+            except Exception as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+
         def _get_run_route(self, parsed) -> None:
             parts = parsed.path.strip("/").split("/")
             run_id = parts[2] if len(parts) >= 3 else ""
@@ -146,6 +195,19 @@ def create_server(
                 self._json(run_store.get_run(run_id))
             else:
                 self._error(HTTPStatus.NOT_FOUND, "接口不存在")
+
+        def _validated_saved_workflow(self, payload: dict[str, Any]) -> dict[str, Any]:
+            workflow = payload.get("workflow") or {}
+            validate_workflow(workflow, registry.keys())
+            validate_workflow_node_configs(workflow, registry)
+            return sanitize_workflow(workflow, registry)
+
+        @staticmethod
+        def _workflow_id(path: str) -> str:
+            workflow_id = path.removeprefix("/api/workflows/").strip("/")
+            if not workflow_id or "/" in workflow_id:
+                raise KeyError("工作流不存在")
+            return workflow_id
 
         def _static(self, request_path: str) -> None:
             relative = "index.html" if request_path in {"", "/"} else request_path.lstrip("/")

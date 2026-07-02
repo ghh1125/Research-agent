@@ -41,6 +41,15 @@ def test_workflow_page_contains_editor_configuration_and_review_surfaces() -> No
     assert "checkpointSignature" in script
     assert "setWorkflowLocked" in script
     assert "当前运行使用启动时的工作流快照" in html
+    assert 'id="saved-workflows"' in html
+    assert 'id="save-workflow"' in html
+    assert 'id="save-workflow-as"' in html
+    assert 'id="open-workflow"' in html
+    assert 'id="delete-workflow"' in html
+    assert "activeWorkflowId" in script
+    assert 'api("/api/workflows"' in script
+    assert 'updateExisting ? "PUT" : "POST"' in script
+    assert "method: \"DELETE\"" in script
 
 
 def test_server_entry_point_and_readme_document_the_independent_demo() -> None:

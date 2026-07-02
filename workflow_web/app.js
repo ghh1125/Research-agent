@@ -7,6 +7,10 @@ const state = {
   pollTimer: null,
   runStatus: "idle",
   checkpointSignature: null,
+  activeWorkflowId: null,
+  workflowName: "默认投研工作流",
+  workflowDescription: "",
+  savedWorkflows: [],
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -32,14 +36,122 @@ function toast(message) {
 }
 
 async function initialize() {
-  const [definitions, workflow] = await Promise.all([
+  const [definitions, workflow, savedWorkflows] = await Promise.all([
     api("/api/functions"),
     api("/api/examples/research-workflow"),
+    api("/api/workflows"),
   ]);
   state.definitions = new Map(definitions.map((item) => [item.type, item]));
   state.workflow = workflow;
+  state.workflowName = workflow.name || "默认投研工作流";
+  state.savedWorkflows = savedWorkflows;
   renderPalette();
   renderCanvas();
+  renderWorkflowLibrary();
+}
+
+function renderWorkflowLibrary(selectedId = state.activeWorkflowId) {
+  const picker = $("#saved-workflows");
+  picker.innerHTML = state.savedWorkflows.length
+    ? `<option value="">请选择已保存工作流</option>${state.savedWorkflows.map((item) => `
+      <option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(formatTimestamp(item.updatedAt))}</option>`).join("")}`
+    : '<option value="">暂无已保存工作流</option>';
+  picker.value = selectedId || "";
+  $("#workflow-name").value = state.workflowName;
+  $("#workflow-description").value = state.workflowDescription;
+  $("#current-workflow-status").textContent = state.activeWorkflowId
+    ? `已打开：${state.workflowName}`
+    : "尚未保存";
+  $("#delete-workflow").disabled = !state.activeWorkflowId || isWorkflowLocked();
+  $("#open-workflow").disabled = !picker.value || isWorkflowLocked();
+}
+
+function formatTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+async function refreshSavedWorkflows(selectedId = state.activeWorkflowId) {
+  state.savedWorkflows = await api("/api/workflows");
+  renderWorkflowLibrary(selectedId);
+}
+
+function resetEditorRuntime() {
+  clearInterval(state.pollTimer);
+  state.runId = null;
+  state.runStatus = "idle";
+  state.checkpointSignature = null;
+  state.selectedNodeId = null;
+  state.connectionSource = null;
+  $("#run-summary").textContent = "尚未运行";
+  $("#node-statuses").innerHTML = "";
+  $("#checkpoint-panel").hidden = true;
+  $("#report-content").className = "empty-state";
+  $("#report-content").textContent = "运行产生的报告会显示在这里。";
+}
+
+async function openSavedWorkflow() {
+  if (isWorkflowLocked()) return toast("当前运行完成后才能打开其他工作流");
+  const workflowId = $("#saved-workflows").value;
+  if (!workflowId) return toast("请先选择已保存工作流");
+  try {
+    const record = await api(`/api/workflows/${encodeURIComponent(workflowId)}`);
+    resetEditorRuntime();
+    state.activeWorkflowId = record.id;
+    state.workflowName = record.name;
+    state.workflowDescription = record.description || "";
+    state.workflow = record.workflow;
+    renderCanvas();
+    renderConfig();
+    renderWorkflowLibrary(record.id);
+    toast(`已打开：${record.name}`);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function saveCurrentWorkflow(saveAs = false) {
+  if (isWorkflowLocked()) return toast("当前运行完成后才能保存工作流");
+  state.workflowName = $("#workflow-name").value.trim();
+  state.workflowDescription = $("#workflow-description").value.trim();
+  if (!state.workflowName) return toast("请填写工作流名称");
+  try {
+    await validateCurrent(false);
+    const updateExisting = Boolean(state.activeWorkflowId) && !saveAs;
+    const path = updateExisting
+      ? `/api/workflows/${encodeURIComponent(state.activeWorkflowId)}`
+      : "/api/workflows";
+    const record = await api(path, {
+      method: updateExisting ? "PUT" : "POST",
+      body: JSON.stringify({
+        name: state.workflowName,
+        description: state.workflowDescription,
+        workflow: state.workflow,
+      }),
+    });
+    state.activeWorkflowId = record.id;
+    state.workflowName = record.name;
+    state.workflowDescription = record.description || "";
+    await refreshSavedWorkflows(record.id);
+    toast(updateExisting ? "工作流已更新" : "工作流已保存");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function deleteSavedWorkflow() {
+  if (isWorkflowLocked()) return toast("当前运行完成后才能删除工作流");
+  if (!state.activeWorkflowId) return toast("当前工作流尚未保存");
+  if (!window.confirm(`确认删除“${state.workflowName}”？`)) return;
+  try {
+    await api(`/api/workflows/${encodeURIComponent(state.activeWorkflowId)}`, { method: "DELETE" });
+    state.activeWorkflowId = null;
+    await refreshSavedWorkflows();
+    toast("已删除保存记录；当前画布仍保留，可重新保存");
+  } catch (error) {
+    toast(error.message);
+  }
 }
 
 function renderPalette() {
@@ -416,11 +528,16 @@ async function loadDefault() {
     toast("当前运行使用启动时快照，完成后才能重置画布");
     return;
   }
-  state.workflow = await api("/api/examples/research-workflow");
-  state.selectedNodeId = null;
-  state.connectionSource = null;
+  const workflow = await api("/api/examples/research-workflow");
+  resetEditorRuntime();
+  state.workflow = workflow;
+  state.activeWorkflowId = null;
+  state.workflowName = workflow.name || "默认投研工作流";
+  state.workflowDescription = "";
   renderCanvas();
   renderConfig();
+  renderWorkflowLibrary();
+  toast("已新建默认工作流；保存后会写入数据库");
 }
 
 async function validateCurrent(showSuccess = true) {
@@ -504,10 +621,11 @@ function setWorkflowLocked(locked) {
   $("#snapshot-notice").hidden = !locked;
   $("#load-default").disabled = locked;
   document.querySelectorAll(
-    "#palette button, #canvas button, #config-panel input, #config-panel select, #config-panel textarea, #config-panel button",
+    "#workflow-library input, #workflow-library select, #workflow-library button, #palette button, #canvas button, #config-panel input, #config-panel select, #config-panel textarea, #config-panel button",
   ).forEach((element) => {
     element.disabled = locked;
   });
+  if (!locked) renderWorkflowLibrary($("#saved-workflows").value || state.activeWorkflowId);
 }
 
 function applyNodeStatuses(statuses) {
@@ -587,6 +705,15 @@ function renderReports(resultState) {
 }
 
 $("#load-default").addEventListener("click", () => loadDefault().catch((error) => toast(error.message)));
+$("#saved-workflows").addEventListener("change", () => {
+  $("#open-workflow").disabled = !$("#saved-workflows").value || isWorkflowLocked();
+});
+$("#workflow-name").addEventListener("input", () => { state.workflowName = $("#workflow-name").value; });
+$("#workflow-description").addEventListener("input", () => { state.workflowDescription = $("#workflow-description").value; });
+$("#open-workflow").addEventListener("click", openSavedWorkflow);
+$("#save-workflow").addEventListener("click", () => saveCurrentWorkflow(false));
+$("#save-workflow-as").addEventListener("click", () => saveCurrentWorkflow(true));
+$("#delete-workflow").addEventListener("click", deleteSavedWorkflow);
 $("#validate-workflow").addEventListener("click", () => validateCurrent().catch((error) => toast(error.message)));
 $("#run-workflow").addEventListener("click", runWorkflow);
 window.addEventListener("resize", renderEdges);

@@ -20,6 +20,29 @@
     </div>
   </header>
 
+  <section id="workflow-library" class="workflow-library" aria-label="本地工作流库">
+    <div class="workflow-identity">
+      <label>当前工作流名称
+        <input id="workflow-name" maxlength="120" value="默认投研工作流">
+      </label>
+      <label>描述
+        <input id="workflow-description" maxlength="300" placeholder="可选">
+      </label>
+      <span id="current-workflow-status">尚未保存</span>
+    </div>
+    <div class="workflow-library-actions">
+      <label>已保存工作流
+        <select id="saved-workflows">
+          <option value="">暂无已保存工作流</option>
+        </select>
+      </label>
+      <button id="open-workflow" type="button">打开</button>
+      <button id="save-workflow" class="primary" type="button">保存</button>
+      <button id="save-workflow-as" type="button">另存为</button>
+      <button id="delete-workflow" class="danger" type="button">删除</button>
+    </div>
+  </section>
+
   <section class="credentials" aria-label="运行凭据">
     <label>DashScope API Key<input id="dashscope-key" type="password" autocomplete="off"></label>
     <label>Serper API Key<input id="serper-key" type="password" autocomplete="off"></label>

@@ -36,6 +36,40 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .topbar p { margin: 5px 0 0; color: #b9c0c8; font-size: 13px; }
 .topbar-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+.workflow-library {
+  padding: 10px 20px;
+  border-bottom: 1px solid #d9dee4;
+  background: #f7f9fa;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.workflow-identity,
+.workflow-library-actions {
+  display: flex;
+  align-items: end;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.workflow-library label {
+  display: grid;
+  gap: 4px;
+  min-width: 180px;
+  font-size: 12px;
+  font-weight: 600;
+}
+#workflow-name { width: 230px; }
+#workflow-description { width: 280px; }
+#saved-workflows { width: 280px; }
+#current-workflow-status {
+  padding-bottom: 9px;
+  color: #59636e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .credentials {
   min-height: 58px;
   padding: 10px 20px;
@@ -238,6 +272,13 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: in
 }
 @media (max-width: 620px) {
   .topbar { align-items: flex-start; flex-direction: column; }
+  .workflow-library,
+  .workflow-identity,
+  .workflow-library-actions,
+  .workflow-library label,
+  #workflow-name,
+  #workflow-description,
+  #saved-workflows { width: 100%; }
   .credentials label, .credentials input { width: 100%; }
   .workspace { display: block; }
   .palette { grid-template-columns: repeat(2, minmax(0, 1fr)); }
